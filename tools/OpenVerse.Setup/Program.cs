@@ -34,6 +34,15 @@ Console.WriteLine($"out:    {outDir}");
 Directory.CreateDirectory(outDir);
 
 var csv = ExtractCardMaster(clientData, outDir);
+// Since the service ended, a PC that never cached the master cannot get one from the client any more, and a PC that
+// has run OpenVerse holds OpenVerse's copy instead of the original. Either way a card master someone copied into the
+// data folder is just as good (it is the same for everyone), so finding one there is success, not failure
+var existingMaster = Path.Combine(outDir, "card_master_full.csv.gz");
+if (csv is null && File.Exists(existingMaster))
+{
+    csv = ReadCardMaster(existingMaster);
+    if (csv is not null) Console.WriteLine($"card_master: no client cache, using the one already in place ({existingMaster})");
+}
 var extracted = csv is not null;
 var latest = extracted && ContentHash(csv!) == LatestHash;
 
@@ -42,6 +51,13 @@ var haveBundled = bundled.All(f => File.Exists(Path.Combine(outDir, f)));
 
 Console.WriteLine();
 Console.WriteLine(extracted ? "  [ok] card_master" : "  [--] card_master (not extracted)");
+if (!extracted)
+{
+    Console.WriteLine();
+    Console.WriteLine($"  Copy card_master_full.csv.gz from a PC where setup worked into:");
+    Console.WriteLine($"    {outDir}");
+    Console.WriteLine($"  setup이 성공한 PC의 card_master_full.csv.gz 파일을 위 폴더에 넣으면 됩니다 (setup은 다시 실행하지 않아도 됩니다).");
+}
 foreach (var f in bundled)
     Console.WriteLine(File.Exists(Path.Combine(outDir, f)) ? $"  [ok] {f}" : $"  [--] {f} (missing)");
 if (extracted && !latest)
@@ -52,7 +68,8 @@ Console.WriteLine();
 
 const uint MbError = 0x10, MbWarn = 0x30, MbInfo = 0x40;
 var (title, body, icon) =
-    !ready ? ("セットアップ失敗", "セットアップに失敗しました。コンソールの [--] を確認してください。", MbError)
+    !extracted && haveBundled ? ("セットアップ失敗", $"card_master がありません。\nsetup이 성공한 PC의 card_master_full.csv.gz 파일을 아래 폴더에 넣어 주세요:\n{outDir}", MbError)
+    : !ready ? ("セットアップ失敗", "セットアップに失敗しました。コンソールの [--] を確認してください。", MbError)
     : !latest ? ("セットアップ完了 (警告)", "セットアップは完了しましたが、card_master が最新ではありません。\n終了直前まで同期していないクライアントのため、一部のカードが古い可能性があります。", MbWarn)
     : ("セットアップ完了", "セットアップが完了しました。openverse-launcher を実行して遊べます。", MbInfo);
 
@@ -90,6 +107,24 @@ static string? ExtractCardMaster(string clientData, string outDir)
 
     Console.WriteLine($"card_master: {csv.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length} rows -> {outPath}");
     return csv;
+}
+
+// a card master already in the data folder (copied from another PC, or extracted earlier). null if it is not one
+static string? ReadCardMaster(string path)
+{
+    try
+    {
+        using var fs = File.OpenRead(path);
+        using var gz = new GZipStream(fs, CompressionMode.Decompress);
+        using var sr = new StreamReader(gz, Encoding.UTF8);
+        var csv = sr.ReadToEnd();
+        return csv.Split('\n').Length > 100 ? csv : null;
+    }
+    catch (Exception e)
+    {
+        Console.Error.WriteLine($"card_master: {path} is not a usable card master ({e.Message})");
+        return null;
+    }
 }
 
 static string ContentHash(string csv)
