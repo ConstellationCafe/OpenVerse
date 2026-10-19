@@ -25,15 +25,28 @@ public sealed class RoomHandler
         path.StartsWith("/shadowverse/open_room/", StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith("/shadowverse/open_room_battle/", StringComparison.OrdinalIgnoreCase);
 
-    public async Task<string> HandleAsync(string path, string reqJson, string ownerUdid, string sourceIp = "")
+    // Answered with this result code when a room request cannot be completed (the matching server timed out, is down,
+    // refused us, or has no room left). It is GuildHandler's NetworkDefine.MAINTENANCE_TYPE.GUILD_MAINTENANCE: the
+    // client routes 2000-2999 to its each-function maintenance popup, which the player dismisses and which changes
+    // nothing else. A result_code of 1 with an error inside the data is what left the client loading forever
+    public const int RoomUnavailable = GuildHandler.GuildMaintenance;
+
+    // Leaving must always work, or a player whose server went away is stuck in a room they cannot get out of
+    static readonly HashSet<string> AlwaysSucceeds = ["leave_room", "close_room", "force_release_room"];
+
+    public async Task<(int ResultCode, string Data)> HandleAsync(string path, string reqJson, string ownerUdid, string sourceIp = "")
     {
         _backend.NoteSourceIp(ownerUdid, sourceIp);
-        try { return await HandleCore(path, reqJson, ownerUdid); }
-        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or InvalidOperationException)
+        var name = path[(path.LastIndexOf('/') + 1)..];
+        try { return (1, await HandleCore(path, reqJson, ownerUdid)); }
+        catch (Exception e) when (e is RoomServiceException or InvalidOperationException)
         {
-            // the matching server is down or refused us. say so loudly: to the player it just looks like a dead room
-            Console.WriteLine($"  [room] OpenVerseBE unreachable or refused ({e.Message})");
-            return JsonSerializer.Serialize(new { result_reason = -1, room_result = 0 });
+            var kind = e is RoomServiceException rs ? rs.Kind.ToString() : "Error";
+            // to the player this is only a dialog, so the reason has to be in the log
+            Console.WriteLine($"  [room] {name} failed: {kind} ({e.Message})");
+            if (AlwaysSucceeds.Contains(name))
+                return (1, name == "close_room" ? "{}" : JsonSerializer.Serialize(new { result_reason = 0, room_result = 1 }));
+            return (RoomUnavailable, "{}");
         }
     }
 

@@ -23,6 +23,8 @@ sealed class FakeBe : HttpMessageHandler
     public int Registrations;
     public string? RequiredCafeKey;
     public bool Down;
+    public bool Full;          // the server's room limit is reached
+    public TimeSpan Delay;     // the server answers this late
     long _nextVid = 100000;
 
     static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
@@ -48,6 +50,7 @@ sealed class FakeBe : HttpMessageHandler
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, CancellationToken ct)
     {
         if (Down) throw new HttpRequestException("connection refused");
+        if (Delay > TimeSpan.Zero) await Task.Delay(Delay, ct);
         var path = req.RequestUri!.AbsolutePath;
         var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
 
@@ -69,6 +72,8 @@ sealed class FakeBe : HttpMessageHandler
         var auth = req.Headers.Authorization?.Parameter;
         if (auth is null || !Tokens.TryGetValue(auth, out var me)) return Reply(HttpStatusCode.Unauthorized);
 
+        if (path == "/v1/rooms" && req.Method == HttpMethod.Post && Full)
+            return Reply(HttpStatusCode.ServiceUnavailable, new { error = "room_limit" });
         if (path == "/v1/rooms" && req.Method == HttpMethod.Post)
         {
             var j = JsonDocument.Parse(body).RootElement;
@@ -141,8 +146,15 @@ public class CentralMatchingTests : IDisposable
         try { File.Delete(_db); } catch { }
     }
 
-    async Task<JsonElement> Call(string name, object req, string udid, string group = "open_room") =>
-        JsonDocument.Parse(await _rooms.HandleAsync($"/shadowverse/{group}/{name}", JsonSerializer.Serialize(req), udid)).RootElement;
+    async Task<JsonElement> Call(string name, object req, string udid, string group = "open_room")
+    {
+        var (code, data) = await _rooms.HandleAsync($"/shadowverse/{group}/{name}", JsonSerializer.Serialize(req), udid);
+        Assert.True(code == 1, $"{name} answered result_code {code}");
+        return JsonDocument.Parse(data).RootElement;
+    }
+
+    Task<(int ResultCode, string Data)> Raw(RoomHandler h, string name, object req, string udid, string group = "open_room") =>
+        h.HandleAsync($"/shadowverse/{group}/{name}", JsonSerializer.Serialize(req), udid);
 
     static readonly object Settings = new
     {
@@ -236,24 +248,86 @@ public class CentralMatchingTests : IDisposable
         Assert.Equal(a, await _backend.Register("player-a"));
     }
 
+    // every failure is the client's dismissible maintenance dialog (2000-2999), never a result_code 1 the client
+    // cannot use, which is what left it loading forever
     [Fact]
-    public async Task AWrongCafeKeyIsReportedNotThrown()
+    public void FailuresUseTheDismissibleDialogCode() =>
+        Assert.InRange(RoomHandler.RoomUnavailable, 2000, 2999);
+
+    [Fact]
+    public async Task AWrongCafeKeyShowsTheDialog()
     {
         _be.RequiredCafeKey = "right";
-        var r = await Call("create_room", Settings, "owner-udid");
-        Assert.Equal(-1, r.GetProperty("result_reason").GetInt32());
+        var (code, _) = await Raw(_rooms, "create_room", Settings, "owner-udid");
+        Assert.Equal(RoomHandler.RoomUnavailable, code);
 
         var keyed = new RoomHandler(new RemoteRoomBackend(new Uri("https://be.example/"), "right", u => u, _be), _users, _decks);
-        var ok = JsonDocument.Parse(await keyed.HandleAsync("/shadowverse/open_room/create_room", JsonSerializer.Serialize(Settings), "owner-udid")).RootElement;
-        Assert.True(ok.TryGetProperty("room_id", out _));
+        var (okCode, ok) = await Raw(keyed, "create_room", Settings, "owner-udid");
+        Assert.Equal(1, okCode);
+        Assert.True(JsonDocument.Parse(ok).RootElement.TryGetProperty("room_id", out _));
     }
 
     [Fact]
-    public async Task AnUnreachableServerIsReportedNotThrown()
+    public async Task AnUnreachableServerShowsTheDialog()
     {
         _be.Down = true;
-        var r = await Call("create_room", Settings, "owner-udid");
-        Assert.Equal(-1, r.GetProperty("result_reason").GetInt32());
+        Assert.Equal(RoomHandler.RoomUnavailable, (await Raw(_rooms, "create_room", Settings, "owner-udid")).ResultCode);
+        Assert.Equal(RoomHandler.RoomUnavailable, (await Raw(_rooms, "enter_room", new { room_id = "12345" }, "visitor-udid")).ResultCode);
+    }
+
+    [Fact]
+    public async Task TheRoomLimitShowsTheDialog()
+    {
+        _be.Full = true;
+        Assert.Equal(RoomHandler.RoomUnavailable, (await Raw(_rooms, "create_room", Settings, "owner-udid")).ResultCode);
+
+        _be.Full = false;   // a room closed somewhere: the next try works
+        Assert.Equal(1, (await Raw(_rooms, "create_room", Settings, "owner-udid")).ResultCode);
+    }
+
+    [Fact]
+    public async Task ATimeoutShowsTheDialogInsteadOfWaiting()
+    {
+        var slow = new FakeBe { Delay = TimeSpan.FromSeconds(5) };
+        var backend = new RemoteRoomBackend(new Uri("https://be.example/"), "", u => _users.GetOrCreate(u).Name, slow,
+            timeout: TimeSpan.FromMilliseconds(200));
+        var handler = new RoomHandler(backend, _users, _decks);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var (code, _) = await Raw(handler, "create_room", Settings, "owner-udid");
+        Assert.Equal(RoomHandler.RoomUnavailable, code);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3), $"took {sw.Elapsed}");
+    }
+
+    [Fact]
+    public async Task TimeoutAndRoomLimitAreToldApartInTheBackend()
+    {
+        var slow = new RemoteRoomBackend(new Uri("https://be.example/"), "", u => _users.GetOrCreate(u).Name,
+            new FakeBe { Delay = TimeSpan.FromSeconds(5) }, timeout: TimeSpan.FromMilliseconds(200));
+        var t = await Assert.ThrowsAsync<RoomServiceException>(() => slow.Create("owner-udid", new RoomSettings(1, 1, 1, 0, false, false)));
+        Assert.Equal(RoomFailure.Timeout, t.Kind);
+
+        _be.Full = true;
+        var f = await Assert.ThrowsAsync<RoomServiceException>(() => _backend.Create("owner-udid", new RoomSettings(1, 1, 1, 0, false, false)));
+        Assert.Equal(RoomFailure.RoomLimit, f.Kind);
+
+        _be.Full = false;
+        _be.Down = true;
+        var d = await Assert.ThrowsAsync<RoomServiceException>(() => _backend.Create("owner-udid", new RoomSettings(1, 1, 1, 0, false, false)));
+        Assert.Equal(RoomFailure.Unreachable, d.Kind);
+    }
+
+    // a player whose server went away must still be able to walk out of the room screen
+    [Fact]
+    public async Task LeavingStillWorksWhenTheServerIsDown()
+    {
+        var roomId = (await Call("create_room", Settings, "owner-udid")).GetProperty("room_id").GetString();
+        _be.Down = true;
+        var (leaveCode, leave) = await Raw(_rooms, "leave_room", new { room_id = roomId }, "owner-udid");
+        Assert.Equal(1, leaveCode);
+        Assert.Equal(1, JsonDocument.Parse(leave).RootElement.GetProperty("room_result").GetInt32());
+        Assert.Equal(1, (await Raw(_rooms, "close_room", new { }, "owner-udid")).ResultCode);
+        Assert.Equal(1, (await Raw(_rooms, "force_release_room", new { }, "owner-udid")).ResultCode);
     }
 }
 

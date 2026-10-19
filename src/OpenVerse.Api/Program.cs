@@ -196,7 +196,11 @@ RemoteRoomBackend? remoteRooms = string.IsNullOrWhiteSpace(beUrl)
     ? null
     : new RemoteRoomBackend(new Uri(beUrl.TrimEnd('/') + "/"),
         Environment.GetEnvironmentVariable("OPENVERSE_CAFE_KEY") ?? "",
-        udid => users.GetOrCreate(udid).Name);
+        udid => users.GetOrCreate(udid).Name,
+        timeout: double.TryParse(Environment.GetEnvironmentVariable("OPENVERSE_BE_TIMEOUT_SECONDS"),
+            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var secs) && secs > 0
+            ? TimeSpan.FromSeconds(secs)
+            : null);
 IRoomBackend roomBackend = (IRoomBackend?)remoteRooms ?? new LocalRoomBackend(rooms, users, battleDeckStore);
 Console.WriteLine(remoteRooms is null ? "Rooms: standalone (in this process)" : $"Rooms: central, OpenVerseBE at {beUrl}");
 var roomHandler = new RoomHandler(roomBackend, users, deckStore);
@@ -435,7 +439,7 @@ app.MapMethods("/{**path}", ["GET", "POST"], async context =>
         string handler;
         var resultCode = 1;
         if (DeckHandler.CanHandle(p) && json is not null) { handler = "deck"; data = deckHandler.Handle(p, json, userKey); }
-        else if (RoomHandler.CanHandle(p) && json is not null) { handler = "room"; data = await roomHandler.HandleAsync(p, json, userKey, context.Connection.RemoteIpAddress?.ToString() ?? ""); }
+        else if (RoomHandler.CanHandle(p) && json is not null) { handler = "room"; (resultCode, data) = await roomHandler.HandleAsync(p, json, userKey, context.Connection.RemoteIpAddress?.ToString() ?? ""); }
         else if (GuildHandler.CanHandle(p)) { handler = "guild"; (resultCode, data) = guildHandler.Handle(p, userKey); }
         else if (p.Contains("immutable_data/card_master"))
         {

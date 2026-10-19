@@ -23,6 +23,21 @@ public sealed record RoomInfo(
 
 public enum EnterOutcome { Ok, NotFound, Full }
 
+public enum RoomFailure
+{
+    Timeout,      // OpenVerseBE did not answer in time
+    Unreachable,  // no connection at all (DNS, TLS, refused, network down)
+    RoomLimit,    // the server already has as many rooms open as it allows
+    Refused,      // the cafe key is wrong
+    ServerError,  // anything else the server answered with
+}
+
+// Why a room request could not be completed. RoomHandler turns it into a dialog the client can dismiss
+public sealed class RoomServiceException(RoomFailure kind, string message, Exception? inner = null) : Exception(message, inner)
+{
+    public RoomFailure Kind { get; } = kind;
+}
+
 // Where rooms live. Standalone they are in this process (LocalRoomBackend), as they always were. Central they are in
 // OpenVerseBE (RemoteRoomBackend), so players on different PCs and networks can meet without a VPN.
 // RoomHandler keeps the client-facing response shapes and talks only to this
@@ -114,11 +129,15 @@ public sealed class RemoteRoomBackend : IRoomBackend
     sealed record RoomDto(string RoomId, string BattleId, string NodeServerUrl, int BattleType, int BattleRule,
         int DeckFormat, int TwoPickType, bool IsOwner, PlayerDto Owner);
 
-    public RemoteRoomBackend(Uri baseUrl, string cafeKey, Func<string, string> nameOf, HttpMessageHandler? handler = null)
+    public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
+
+    public RemoteRoomBackend(Uri baseUrl, string cafeKey, Func<string, string> nameOf, HttpMessageHandler? handler = null,
+        TimeSpan? timeout = null)
     {
         _http = handler is null ? new HttpClient() : new HttpClient(handler);
         _http.BaseAddress = baseUrl;
-        _http.Timeout = TimeSpan.FromSeconds(10);
+        // short enough that the client gets an answer (a dialog) before it gives up waiting on its own
+        _http.Timeout = timeout ?? DefaultTimeout;
         _cafeKey = cafeKey;
         _nameOf = nameOf;
     }
@@ -133,12 +152,12 @@ public sealed class RemoteRoomBackend : IRoomBackend
             Content = JsonContent.Create(new { udid, name = _nameOf(udid) }, options: Json),
         };
         if (_cafeKey.Length > 0) req.Headers.Add("X-OV-Cafe-Key", _cafeKey);
-        using var res = await _http.SendAsync(req);
+        using var res = await Transmit(req);
         if (res.StatusCode == HttpStatusCode.Forbidden)
-            throw new InvalidOperationException("OpenVerseBE refused the cafe key (check cafe_key.txt)");
-        res.EnsureSuccessStatusCode();
+            throw new RoomServiceException(RoomFailure.Refused, "OpenVerseBE refused the cafe key (check cafe_key.txt)");
+        Ensure(res, "register");
         var body = await res.Content.ReadFromJsonAsync<RegisterResponse>(Json)
-            ?? throw new InvalidOperationException("OpenVerseBE: empty register response");
+            ?? throw new RoomServiceException(RoomFailure.ServerError, "OpenVerseBE: empty register response");
         _registered[udid] = new Registration(body.ViewerId, body.Token);
         return body.ViewerId;
     }
@@ -155,7 +174,7 @@ public sealed class RemoteRoomBackend : IRoomBackend
             var req = new HttpRequestMessage(method, path);
             req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", reg.Token);
             if (body is not null) req.Content = JsonContent.Create(body, body.GetType(), options: Json);
-            var res = await _http.SendAsync(req);
+            var res = await Transmit(req);
             if (res.StatusCode != HttpStatusCode.Unauthorized || attempt > 0) return res;
             res.Dispose();
             _registered.TryRemove(udid, out _);
@@ -167,7 +186,29 @@ public sealed class RemoteRoomBackend : IRoomBackend
 
     static async Task<RoomInfo> Read(HttpResponseMessage res) =>
         Info(await res.Content.ReadFromJsonAsync<RoomDto>(Json)
-             ?? throw new InvalidOperationException("OpenVerseBE: empty room response"));
+             ?? throw new RoomServiceException(RoomFailure.ServerError, "OpenVerseBE: empty room response"));
+
+    // Every request goes through here, so a timeout and a dead connection are told apart in one place.
+    // HttpClient's own timeout surfaces as TaskCanceledException
+    async Task<HttpResponseMessage> Transmit(HttpRequestMessage req)
+    {
+        try { return await _http.SendAsync(req); }
+        catch (TaskCanceledException e)
+        {
+            throw new RoomServiceException(RoomFailure.Timeout,
+                $"OpenVerseBE did not answer within {_http.Timeout.TotalSeconds:0.#}s ({req.Method} {req.RequestUri})", e);
+        }
+        catch (HttpRequestException e)
+        {
+            throw new RoomServiceException(RoomFailure.Unreachable, $"cannot reach OpenVerseBE: {e.Message}", e);
+        }
+    }
+
+    static void Ensure(HttpResponseMessage res, string what)
+    {
+        if (!res.IsSuccessStatusCode)
+            throw new RoomServiceException(RoomFailure.ServerError, $"OpenVerseBE {what}: HTTP {(int)res.StatusCode}");
+    }
 
     public async Task<RoomInfo> Create(string udid, RoomSettings s)
     {
@@ -176,7 +217,9 @@ public sealed class RemoteRoomBackend : IRoomBackend
             battle_type = s.BattleType, battle_rule = s.BattleRule, deck_format = s.DeckFormat,
             two_pick_type = s.TwoPickType, can_friend_watch = s.CanFriendWatch, can_guild_watch = s.CanGuildWatch,
         });
-        res.EnsureSuccessStatusCode();
+        if (res.StatusCode == HttpStatusCode.ServiceUnavailable && await ErrorCode(res) == "room_limit")
+            throw new RoomServiceException(RoomFailure.RoomLimit, "every room on the server is in use (OVBE_MAX_ROOMS)");
+        Ensure(res, "create room");
         return await Read(res);
     }
 
@@ -188,8 +231,19 @@ public sealed class RemoteRoomBackend : IRoomBackend
             HttpStatusCode.OK => (EnterOutcome.Ok, await Read(res)),
             HttpStatusCode.NotFound => (EnterOutcome.NotFound, null),
             HttpStatusCode.Conflict => (EnterOutcome.Full, null),
-            _ => throw new HttpRequestException($"OpenVerseBE enter: {(int)res.StatusCode}"),
+            _ => throw new RoomServiceException(RoomFailure.ServerError, $"OpenVerseBE enter: HTTP {(int)res.StatusCode}"),
         };
+    }
+
+    // the {"error": "..."} body OpenVerseBE answers refusals with
+    static async Task<string?> ErrorCode(HttpResponseMessage res)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+            return doc.RootElement.TryGetProperty("error", out var e) ? e.GetString() : null;
+        }
+        catch (JsonException) { return null; }
     }
 
     public async Task Leave(string udid, string roomId)
@@ -206,7 +260,7 @@ public sealed class RemoteRoomBackend : IRoomBackend
     {
         using var res = await Send(udid, HttpMethod.Get, "v1/rooms/mine");
         if (res.StatusCode == HttpStatusCode.NotFound) return null;
-        res.EnsureSuccessStatusCode();
+        Ensure(res, "room");
         return await Read(res);
     }
 
@@ -214,7 +268,7 @@ public sealed class RemoteRoomBackend : IRoomBackend
     {
         using var res = await Send(udid, HttpMethod.Get, $"v1/rooms/{Uri.EscapeDataString(roomId)}");
         if (res.StatusCode == HttpStatusCode.NotFound) return null;
-        res.EnsureSuccessStatusCode();
+        Ensure(res, "room");
         return await Read(res);
     }
 
@@ -226,6 +280,6 @@ public sealed class RemoteRoomBackend : IRoomBackend
             sleeve_id = deck.SleeveId, leader_skin_id = deck.LeaderSkinId, card_ids = deck.CardIds,
             user_name = deck.UserName,
         });
-        res.EnsureSuccessStatusCode();
+        Ensure(res, "deck");
     }
 }
