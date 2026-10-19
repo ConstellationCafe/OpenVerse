@@ -8,14 +8,12 @@ using OpenVerse.Common;
 var builder = WebApplication.CreateBuilder(args);
 
 // tests leave OPENVERSE_LISTEN unset so WebApplicationFactory keeps its TestServer (real launch binds 80 + 443)
-byte[] certDer = [];
 if (Environment.GetEnvironmentVariable("OPENVERSE_LISTEN") == "1")
 {
     var certPath = Environment.GetEnvironmentVariable("OPENVERSE_CERT")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "OpenVerse", "openverse.pfx");
     var certPassword = Environment.GetEnvironmentVariable("OPENVERSE_CERT_PW") ?? "openverse";
-    using (var cert = CertGen.EnsureSelfSigned(certPath, certPassword))
-        certDer = cert.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Cert);  // served at /openverse.cer for auto-trust
+    using (CertGen.EnsureSelfSigned(certPath, certPassword)) { }
     builder.WebHost.ConfigureKestrel(options =>
     {
         options.ListenAnyIP(80);
@@ -186,15 +184,22 @@ var deckCodeHandler = new DeckCodeHandler(deckCodeStore);
 var users = new UserStore();
 var hostName = NameResolver.Resolve(AppContext.BaseDirectory);
 Console.WriteLine($"Name: host = {hostName ?? "(unresolved, using generated)"}");
-var ipNames = new ConcurrentDictionary<string, string>();
-var ipUdids = new ConcurrentDictionary<string, string>();
-var pendingDecks = new ConcurrentDictionary<string, string>();
 var rooms = new RoomStore
 {
     NodeServerUrl = Environment.GetEnvironmentVariable("OPENVERSE_NODE_URL") ?? "127.0.0.1:3001",
 };
 var battleDeckStore = new BattleDeckStore(dbPath);
-var roomHandler = new RoomHandler(rooms, users, deckStore, battleDeckStore);
+// OPENVERSE_BE_URL set = central matching through OpenVerseBE, so players on any network can meet without a VPN.
+// unset = rooms live in this process, as before (one machine, or tests)
+var beUrl = Environment.GetEnvironmentVariable("OPENVERSE_BE_URL");
+RemoteRoomBackend? remoteRooms = string.IsNullOrWhiteSpace(beUrl)
+    ? null
+    : new RemoteRoomBackend(new Uri(beUrl.TrimEnd('/') + "/"),
+        Environment.GetEnvironmentVariable("OPENVERSE_CAFE_KEY") ?? "",
+        udid => users.GetOrCreate(udid).Name);
+IRoomBackend roomBackend = remoteRooms ?? new LocalRoomBackend(rooms, users, battleDeckStore);
+Console.WriteLine(remoteRooms is null ? "Rooms: standalone (in this process)" : $"Rooms: central, OpenVerseBE at {beUrl}");
+var roomHandler = new RoomHandler(roomBackend, users, deckStore);
 
 var dataDir = Path.Combine(AppContext.BaseDirectory, "data");
 var cardDataPath = Path.Combine(dataDir, "shadowverse_ja.json");
@@ -295,18 +300,6 @@ var sleeveManifest = Path.Combine(manifestDir, "sleeve_assetmanifest");
 var sleeveListJson = SleeveListBuilder.BuildJson(sleeveManifest);
 Console.WriteLine($"SleeveList: granted {sleeveListJson.Split("\"sleeve_id\"").Length - 1} sleeves");
 
-void ImportDecks(string udid, string json)
-{
-    try
-    {
-        var decks = JsonSerializer.Deserialize<List<Deck>>(json);
-        if (decks is null) return;
-        foreach (var d in decks) { d.UserKey = udid; deckStore.Save(d); }
-        Console.WriteLine($"Decks: imported {decks.Count} for udid={udid}");
-    }
-    catch (Exception e) { Console.WriteLine($"Decks: import failed ({e.Message})"); }
-}
-
 app.MapMethods("/{**path}", ["GET", "POST"], async context =>
 {
     var req = context.Request;
@@ -328,19 +321,11 @@ app.MapMethods("/{**path}", ["GET", "POST"], async context =>
         udids.TryGetValue(sid, out udid);
 
     Console.WriteLine($"\n{req.Method} {path}  ({body.Length} bytes) udid={udid}");
-    // bind whoever this box registered (or the host, over loopback) to the udid, so every screen shows the same name
+    // the game runs on this same machine, so the player is whoever this machine's username.txt / Steam names
     if (udid is not null)
     {
         var ip = context.Connection.RemoteIpAddress;
-        var resolved = ip is not null && IPAddress.IsLoopback(ip)
-            ? hostName
-            : ipNames.GetValueOrDefault(ip?.ToString() ?? "");
-        if (resolved is not null) users.GetOrCreate(udid).Name = resolved;
-        if (ip is not null)
-        {
-            ipUdids[ip.ToString()] = udid;
-            if (pendingDecks.TryRemove(ip.ToString(), out var pushed)) ImportDecks(udid, pushed);
-        }
+        if (ip is not null && IPAddress.IsLoopback(ip) && hostName is not null) users.GetOrCreate(udid).Name = hostName;
     }
     string? reqJson = null;
     if (udid is not null && body.Length > 32)
@@ -359,42 +344,6 @@ app.MapMethods("/{**path}", ["GET", "POST"], async context =>
         catch (Exception e) { Console.WriteLine($"  decode failed: {e.Message}"); }
     }
 
-    // A joining client's launcher posts its own name here (plain HTTP, same as the cert fetch), since this side cannot
-    // read that machine's name.txt or Steam install. keyed by source IP: the game then connects from the same box
-    if (path.Equals("/openverse/name", StringComparison.OrdinalIgnoreCase))
-    {
-        var ip = context.Connection.RemoteIpAddress?.ToString();
-        var posted = System.Text.Encoding.UTF8.GetString(body).Trim();
-        if (ip is not null && posted.Length > 0)
-        {
-            ipNames[ip] = posted;
-            Console.WriteLine($"Name: {ip} = {posted}");
-        }
-        context.Response.StatusCode = 204;
-        return;
-    }
-
-    // A client's decks live on its own machine, not on whoever it happened to join. push before the game starts (the
-    // udid is not known yet, so hold it by IP), pull after it exits
-    if (path.Equals("/openverse/decks", StringComparison.OrdinalIgnoreCase))
-    {
-        var ip = context.Connection.RemoteIpAddress?.ToString();
-        if (ip is null) { context.Response.StatusCode = 400; return; }
-        if (req.Method == "POST")
-        {
-            var pushed = System.Text.Encoding.UTF8.GetString(body);
-            if (ipUdids.TryGetValue(ip, out var known)) ImportDecks(known, pushed);
-            else pendingDecks[ip] = pushed;
-            context.Response.StatusCode = 204;
-            return;
-        }
-        var decks = ipUdids.TryGetValue(ip, out var u) ? deckStore.List(u) : [];
-        Console.WriteLine($"Decks: {ip} pulled {decks.Count}");
-        context.Response.ContentType = "application/json";
-        await context.Response.WriteAsync(JsonSerializer.Serialize(decks));
-        return;
-    }
-
     // The editor only ever offers the deck's own class, so a mixed-class deck has to arrive as a code instead.
     // DeckCreateMenuUI checks only that each id exists in the master
     if (path.Equals("/openverse/deckcode", StringComparison.OrdinalIgnoreCase))
@@ -403,14 +352,6 @@ app.MapMethods("/{**path}", ["GET", "POST"], async context =>
         Console.WriteLine($"  -> [deckcode rc={rc}] {minted}");
         context.Response.ContentType = "application/json";
         await context.Response.WriteAsync(minted);
-        return;
-    }
-
-    if (path.Equals("/openverse.cer", StringComparison.OrdinalIgnoreCase) && certDer.Length > 0)
-    {
-        Console.WriteLine("  -> serving cert");
-        context.Response.ContentType = "application/x-x509-ca-cert";
-        await context.Response.Body.WriteAsync(certDer);
         return;
     }
 
@@ -462,7 +403,7 @@ app.MapMethods("/{**path}", ["GET", "POST"], async context =>
     }
 
     if (udid is not null)
-        await context.Response.WriteAsync(WireCodec.EncodeResponse(Response(path, reqJson, udid), udid));
+        await context.Response.WriteAsync(WireCodec.EncodeResponse(await Response(path, reqJson, udid), udid));
     else
         await context.Response.WriteAsync("{}");
 
@@ -473,13 +414,20 @@ app.MapMethods("/{**path}", ["GET", "POST"], async context =>
         return stub.Replace("\"__OPENVERSE_NAME__\"", quoted);
     }
 
-    string Response(string p, string? json, string userKey)
+    async Task<string> Response(string p, string? json, string userKey)
     {
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         // SignUpTask reads viewer_id/short_udid/udid from data_headers (not data), and aborts if the udid isn't its own
         if (p.Contains("tool/signup"))
         {
             var u = users.GetOrCreate(userKey);
+            // centrally the id comes from OpenVerseBE: every PC numbering its own from 100001 would hand two players
+            // the same one. a server that cannot be reached leaves the local id, and rooms will say why they fail
+            if (remoteRooms is not null)
+            {
+                try { u.ViewerId = await remoteRooms.Register(userKey); }
+                catch (Exception e) { Console.WriteLine($"  [signup] OpenVerseBE register failed ({e.Message}), keeping local id"); }
+            }
             Console.WriteLine($"  -> [signup] viewer_id={u.ViewerId}");
             return $"{{\"data_headers\":{{\"result_code\":1,\"servertime\":{now},\"viewer_id\":{u.ViewerId},\"short_udid\":{u.ViewerId},\"udid\":\"{userKey}\"}},\"data\":{{}}}}";
         }
@@ -487,7 +435,7 @@ app.MapMethods("/{**path}", ["GET", "POST"], async context =>
         string handler;
         var resultCode = 1;
         if (DeckHandler.CanHandle(p) && json is not null) { handler = "deck"; data = deckHandler.Handle(p, json, userKey); }
-        else if (RoomHandler.CanHandle(p) && json is not null) { handler = "room"; data = roomHandler.Handle(p, json, userKey, context.Connection.RemoteIpAddress?.ToString() ?? ""); }
+        else if (RoomHandler.CanHandle(p) && json is not null) { handler = "room"; data = await roomHandler.HandleAsync(p, json, userKey, context.Connection.RemoteIpAddress?.ToString() ?? ""); }
         else if (GuildHandler.CanHandle(p)) { handler = "guild"; (resultCode, data) = guildHandler.Handle(p, userKey); }
         else if (p.Contains("immutable_data/card_master"))
         {

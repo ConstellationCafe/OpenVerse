@@ -38,10 +38,14 @@ Jpn and Eng, switched by the HTTP `LANGUAGE` header.
 
 ## Network
 
-Point `utoongaize.shadowverse.jp` at the server via hosts on each machine. Whoever hosts picks the method:
+Each machine points `utoongaize.shadowverse.jp` at its own 127.0.0.1 via hosts, and every player runs the API on their own PC: the card master, assets and decks come from their own client.
 
-- VPN (no port forwarding, good for private groups)
-- Fixed host (needs port forwarding or DDNS)
+Room matches run one of two ways:
+
+- Standalone: no `be_url.txt` beside the launcher. Rooms and the battle server stay on that machine (development and tests)
+- Central: `be_url.txt` holds the address of an [OpenVerseBE](https://github.com/ConstellationCafe/OpenVerseBE) server. Only `open_room/*` goes there, rooms live in Redis, and battles go through that server's `OpenVerse.Battle`, which reads the decks from the same Redis. No VPN; the server needs ports 443 and 3001 open
+
+Centrally, the source address used to tell the seats apart is recorded by OpenVerseBE (a request from a player's API comes from that player's public IP). `cafe_key.txt` must match the server's `OVBE_CAFE_KEY` and keeps registration to your own group.
 - The endpoint is HTTPS, but the client does not validate the cert, so a self-signed one works as-is (no client patch or mkcert, the launcher generates it)
 
 ## Battle engine

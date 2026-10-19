@@ -1,7 +1,4 @@
 using System.Diagnostics;
-using System.Net;
-using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
 using System.Text;
@@ -9,7 +6,7 @@ using OpenVerse.Common;
 
 namespace OpenVerse.Launcher;
 
-enum Args { help, host, client, advertise }
+enum Args { help, client }
 
 static class Program
 {
@@ -23,12 +20,8 @@ static class Program
         CmdHelper.RegisterArg(Args.help, new CommandExplanation(
             "print this usage text", "help", "-h")
         { TakeValue = false });
-        CmdHelper.RegisterArg(Args.host, new CommandExplanation(
-            "this decides whether running client or host. by default run in client mode and connects to the host ip or name. leave it out and join_host.txt beside the exe is read instead; empty there too means host mode", "host"));
         CmdHelper.RegisterArg(Args.client, new CommandExplanation(
             "the Shadowverse client's data folder (card_master cache, decks); default: %UserProfile%\\AppData\\LocalLow\\Cygames\\Shadowverse", "client"));
-        CmdHelper.RegisterArg(Args.advertise, new CommandExplanation(
-            "the IP advertised to joining clients for the battle server (host mode only); default: auto-detected LAN/VPN IP", "advertise"));
 
         if (CmdHelper.HasFlag(args, Args.help))
         {
@@ -39,7 +32,9 @@ static class Program
         // Root is what a person edits and keeps, Server is what the build produced. running from release/ puts the
         // first beside the repo rather than inside a directory the next build deletes
         var baseDir = Layout.Root;
-        var joinHost = CmdHelper.ReadArg(args, Args.host) ?? ReadHostFile(baseDir);  // client mode: point the game at a host's server
+        // be_url.txt names the OpenVerseBE server rooms are matched on. without it rooms stay on this machine
+        var beUrl = ReadSetting(baseDir, "be_url.txt");
+        var cafeKey = ReadSetting(baseDir, "cafe_key.txt");
 
         if (!IsAdmin())
         {
@@ -63,7 +58,7 @@ static class Program
         }
         catch { }
 
-        return joinHost is not null ? RunJoin(baseDir, joinHost) : RunHost(baseDir, args);
+        return Run(baseDir, args, beUrl, cafeKey);
     }
 
     sealed class TeeWriter(TextWriter a, TextWriter b) : TextWriter
@@ -108,7 +103,10 @@ static class Program
         return target;
     }
 
-    static int RunHost(string baseDir, string[] args)
+    // Every player runs their own API on this machine (the card master, assets and decks are their own client's).
+    // Centrally only room matching leaves the machine, to OpenVerseBE, and battles run on its battle server; standalone
+    // the battle server runs here too
+    static int Run(string baseDir, string[] args, string? beUrl, string? cafeKey)
     {
         // machine-wide (not per-user) so elevation resolves the same file regardless of account, and it survives a rebuild
         var certPath = Path.Combine(
@@ -124,7 +122,8 @@ static class Program
             return 1;
         }
 
-        var advertise = CmdHelper.ReadArg(args, Args.advertise) ?? DetectLanIp();  // host's reachable IP so friends get a valid node_server_url
+        if (beUrl is not null) Console.WriteLine($"matching on {beUrl}{(cafeKey is null ? "" : " (cafe key set)")}");
+        else Console.WriteLine("no be_url.txt: rooms and battles stay on this machine");
 
         Process? server = null, battle = null;
         var hostsEdited = false;
@@ -133,12 +132,11 @@ static class Program
         {
             cert = CertGen.EnsureSelfSigned(certPath, CertPassword);
             InstallCert(cert);
-            File.WriteAllBytes(Path.Combine(baseDir, "openverse.cer"), cert.Export(X509ContentType.Cert));  // hand this to clients
             EditHosts();
             hostsEdited = true;
-            battle = StartBattle(baseDir, deckDb);
-            server = StartServer(baseDir, advertise, certPath, deckDb);
-            Console.WriteLine("server up on 80/443, battle on 3001.");
+            if (beUrl is null) battle = StartBattle(baseDir, deckDb);
+            server = StartServer(baseDir, beUrl, cafeKey, certPath, deckDb);
+            Console.WriteLine(beUrl is null ? "server up on 80/443, battle on 3001." : "server up on 80/443.");
             Process.Start(new ProcessStartInfo($"steam://rungameid/{SteamAppId}") { UseShellExecute = true });
             Console.WriteLine("launched Shadowverse. close the game to stop.");
             WaitForGameExit();
@@ -154,98 +152,6 @@ static class Program
         }
         return 0;
     }
-
-    static int RunJoin(string baseDir, string host)
-    {
-        X509Certificate2 cert;
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-            cert = X509CertificateLoader.LoadCertificate(http.GetByteArrayAsync($"http://{host}/openverse.cer").GetAwaiter().GetResult());
-            Console.WriteLine($"got cert from {host}.");
-        }
-        catch (Exception e)
-        {
-            var local = Path.Combine(baseDir, "openverse.cer");  // offline fallback
-            if (!File.Exists(local))
-            {
-                Console.Error.WriteLine($"could not fetch cert from host {host} ({e.Message}). is the host running and reachable (ping {host})?");
-                return 1;
-            }
-            cert = X509CertificateLoader.LoadCertificateFromFile(local);
-        }
-        // The host serves the load/index, so it has to be told what to call this machine - it can't read this machine's
-        // username.txt or Steam install. do it before the hosts redirect, while {host} still resolves normally
-        RegisterName(baseDir, host);
-        PushDecks(baseDir, host);
-        var hostsEdited = false;
-        try
-        {
-            InstallCert(cert);
-            EditHosts(host);
-            hostsEdited = true;
-            Console.WriteLine($"joined {host}. launching Shadowverse...");
-            Process.Start(new ProcessStartInfo($"steam://rungameid/{SteamAppId}") { UseShellExecute = true });
-            Console.WriteLine("close the game to stop.");
-            WaitForGameExit();
-            PullDecks(baseDir, host);
-        }
-        finally
-        {
-            if (hostsEdited) RestoreHosts();
-            RemoveCert(cert);
-            cert.Dispose();
-            Console.WriteLine("stopped. hosts restored.");
-        }
-        return 0;
-    }
-
-    static string DeckFile(string baseDir) => Path.Combine(baseDir, "decks.json");
-
-    static void PushDecks(string baseDir, string host)
-    {
-        var f = DeckFile(baseDir);
-        if (!File.Exists(f)) return;
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-            var json = File.ReadAllText(f);
-            http.PostAsync($"http://{host}/openverse/decks", new StringContent(json)).GetAwaiter().GetResult();
-            Console.WriteLine($"sent your decks to {host}.");
-        }
-        catch (Exception e) { Console.WriteLine($"could not send decks ({e.Message}); the host may not have them."); }
-    }
-
-    // the raw IP is used on purpose: hosts is still redirected at this point
-    static void PullDecks(string baseDir, string host)
-    {
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-            var json = http.GetStringAsync($"http://{host}/openverse/decks").GetAwaiter().GetResult();
-            if (json.Trim() is "" or "[]") return;  // nothing to save; keep the previous file
-            File.WriteAllText(DeckFile(baseDir), json);
-            Console.WriteLine("saved your decks locally.");
-        }
-        catch (Exception e) { Console.WriteLine($"could not save decks ({e.Message}); they stay on the host."); }
-    }
-
-    static void RegisterName(string baseDir, string host)
-    {
-        var name = NameResolver.Resolve(baseDir);
-        if (name is null) { Console.WriteLine("no username.txt and no Steam persona found; the host will generate one."); return; }
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            http.PostAsync($"http://{host}/openverse/name", new StringContent(name)).GetAwaiter().GetResult();
-            Console.WriteLine($"registered name \"{name}\" with {host}.");
-        }
-        catch (Exception e) { Console.WriteLine($"could not register name with {host} ({e.Message}); the host will generate one."); }
-    }
-
-    // host.txt is what this was called before, and someone who already put an address in one should keep joining
-    static string? ReadHostFile(string baseDir) =>
-        ReadSetting(baseDir, "join_host.txt") ?? ReadSetting(baseDir, "host.txt");
 
     // elevation goes through ShellExecute, which drops the environment, so a setting given as an env var never reaches
     // the elevated run. One line in a file next to the exe survives and works from a double-click
@@ -301,12 +207,12 @@ static class Program
 
     static string BackupPath => HostsPath + ".openverse.bak";
 
-    static void EditHosts(string ip = "127.0.0.1")
+    static void EditHosts()
     {
         var text = File.ReadAllText(HostsPath);
         if (!File.Exists(BackupPath)) File.Copy(HostsPath, BackupPath);
-        File.WriteAllText(HostsPath, AddBlock(text, RedirectHosts, ip), new UTF8Encoding(false));
-        Console.WriteLine($"hosts redirected to {ip}.");
+        File.WriteAllText(HostsPath, AddBlock(text, RedirectHosts), new UTF8Encoding(false));
+        Console.WriteLine("hosts redirected to 127.0.0.1.");
     }
 
     static void RestoreHosts()
@@ -326,19 +232,17 @@ static class Program
         catch (Exception e) { Console.Error.WriteLine($"hosts restore failed: {e.Message}"); }
     }
 
-    static string AddBlock(string content, IEnumerable<string> hosts, string ip)
+    static string AddBlock(string content, IEnumerable<string> hosts)
     {
         // both redirected names still have AAAA records, so an IPv4-only entry is no redirect on a machine with working
         // IPv6: the A lookup is answered here, the AAAA lookup falls through to real DNS and reaches the dead official
-        // server. Pin v6 alongside. Host mode -> ::1. Join mode knows only the host's v4, so point v6 at a black hole
-        // (::) instead so the name still cannot escape
-        var v6 = ip == "127.0.0.1" ? "::1" : "::";
+        // server. Pin v6 alongside
         var sb = new StringBuilder(RemoveBlock(content).TrimEnd('\r', '\n'));
         sb.Append('\n').Append($"# >>> {Marker} >>>\n");
         foreach (var h in hosts)
         {
-            sb.Append(ip).Append(' ').Append(h).Append('\n');
-            sb.Append(v6).Append(' ').Append(h).Append('\n');
+            sb.Append("127.0.0.1 ").Append(h).Append('\n');
+            sb.Append("::1 ").Append(h).Append('\n');
         }
         sb.Append($"# <<< {Marker} <<<\n");
         return sb.ToString();
@@ -359,24 +263,7 @@ static class Program
         return string.Join('\n', kept);
     }
 
-    static string? DetectLanIp()
-    {
-        try
-        {
-            var addrs = NetworkInterface.GetAllNetworkInterfaces()
-                .Where(n => n.OperationalStatus == OperationalStatus.Up)
-                .SelectMany(n => n.GetIPProperties().UnicastAddresses.Select(u => new { n.Name, u.Address }))
-                .Where(x => x.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(x.Address))
-                .ToList();
-            var pick = addrs.FirstOrDefault(x => x.Name.Contains("Radmin", StringComparison.OrdinalIgnoreCase)) ?? addrs.FirstOrDefault();
-            if (pick is null) return null;
-            Console.WriteLine($"advertising {pick.Address} (auto-detected: {pick.Name})");
-            return pick.Address.ToString();
-        }
-        catch { return null; }
-    }
-
-    static Process StartServer(string baseDir, string? advertise, string certPath, string deckDb)
+    static Process StartServer(string baseDir, string? beUrl, string? cafeKey, string certPath, string deckDb)
     {
         var overridePath = Environment.GetEnvironmentVariable("OPENVERSE_SERVER");
         var exe = Layout.InServer("OpenVerse.Api.exe");
@@ -391,7 +278,9 @@ static class Program
         psi.Environment["OPENVERSE_LISTEN"] = "1";
         psi.Environment["OPENVERSE_CERT"] = certPath;
         psi.Environment["OPENVERSE_DECK_DB"] = deckDb;
-        if (advertise is not null) psi.Environment["OPENVERSE_NODE_URL"] = $"{advertise}:3001";  // battle server address friends connect to
+        // central: OpenVerseBE hands out the battle server address. standalone: the default 127.0.0.1:3001 is this machine
+        if (beUrl is not null) psi.Environment["OPENVERSE_BE_URL"] = beUrl;
+        if (cafeKey is not null) psi.Environment["OPENVERSE_CAFE_KEY"] = cafeKey;
         psi.UseShellExecute = false;
         psi.WorkingDirectory = Layout.Server;
         return StartWithTee(psi);

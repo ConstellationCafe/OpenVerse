@@ -17,7 +17,25 @@ public sealed class BattleDeck
     public string SourceIp { get; set; } = "";
 }
 
-public sealed class BattleDeckStore
+// The hand-off of each player's resolved deck from the API to the battle server. Standalone, both processes share one
+// SQLite file (BattleDeckStore). Centrally, OpenVerseBE writes the deck into Redis and the battle server reads it there
+public interface IBattleDeckStore
+{
+    void Set(BattleDeck d);
+    BattleDeck? Get(string roomId, bool isOwner);
+}
+
+// The Redis value format OpenVerseBE writes (snake_case JSON of BattleDeck)
+public static class BattleDeckJson
+{
+    static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
+
+    public static string Serialize(BattleDeck d) => JsonSerializer.Serialize(d, Options);
+
+    public static BattleDeck? Deserialize(string json) => JsonSerializer.Deserialize<BattleDeck>(json, Options);
+}
+
+public sealed class BattleDeckStore : IBattleDeckStore
 {
     readonly string _connString;
 

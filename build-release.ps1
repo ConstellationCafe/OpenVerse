@@ -91,8 +91,12 @@ Get-ChildItem $rel, $srv -File | Where-Object {
 } | Remove-Item -Force
 
 $keepComment = "# Lines starting with # are ignored, so this one can stay"
-Set-Content -Path (Join-Path $rel "join_host.txt") -Encoding UTF8 -Value @(
-  "# Put the host's IP on one line below to join someone. Leave it empty to host yourself"
+Set-Content -Path (Join-Path $rel "be_url.txt") -Encoding UTF8 -Value @(
+  "# Put the matching server's address on one line below (e.g. https://ov.example.com) to meet players anywhere."
+  "# Leave it empty to keep rooms and battles on this machine"
+  $keepComment)
+Set-Content -Path (Join-Path $rel "cafe_key.txt") -Encoding UTF8 -Value @(
+  "# Put the key the matching server's owner gave you on one line below. Leave it empty if the server has none"
   $keepComment)
 Set-Content -Path (Join-Path $rel "username.txt") -Encoding UTF8 -Value @(
   "# Put your in-game name on one line below. Leave it empty to use your Steam name"
@@ -136,7 +140,7 @@ $deny = $deny | Select-Object -Unique
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) "openverse-ship"
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage | Out-Null
-foreach ($item in ($front + @("join_host.txt", "username.txt", "server"))) {
+foreach ($item in ($front + @("be_url.txt", "cafe_key.txt", "username.txt", "server"))) {
   Copy-Item (Join-Path $rel $item) (Join-Path $stage $item) -Recurse -Force
 }
 Get-ChildItem $stage -Recurse -File | Where-Object { $deny -contains $_.Name } | Remove-Item -Force
@@ -170,11 +174,11 @@ Remove-Item -Recurse -Force $stash -ErrorAction SilentlyContinue
 # descending into release/. they resolve the servers through release/server, and Layout puts host.txt, name.txt and
 # openverse_log up here rather than in a directory the next build deletes
 foreach ($e in $front) { Copy-Item (Join-Path $rel $e) (Join-Path $PSScriptRoot $e) -Force }
-foreach ($t in @("join_host.txt", "username.txt")) {
+foreach ($t in @("be_url.txt", "cafe_key.txt", "username.txt")) {
   $atRoot = Join-Path $PSScriptRoot $t
   if (-not (Test-Path $atRoot)) { Copy-Item (Join-Path $rel $t) $atRoot -Force }   # never overwrite what is already set
 }
-Write-Host "dev copies:    $($front -join ', ') + join_host.txt, username.txt at the repo root"
+Write-Host "dev copies:    $($front -join ', ') + be_url.txt, cafe_key.txt, username.txt at the repo root"
 
 Write-Host "release ready: $rel"
 Write-Host "zip ready:     $zip  ($zipMB MB)"
