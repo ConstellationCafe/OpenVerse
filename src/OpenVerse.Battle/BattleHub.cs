@@ -7,7 +7,7 @@ namespace OpenVerse.Battle;
 public sealed class BattleHub
 {
     readonly SessionManager _sessions;
-    readonly BattleDeckStore _decks;
+    readonly IBattleDeckStore _decks;
     readonly Dictionary<string, Session> _turnOwner = new();
     // who goes first (turnState 0), rolled once per battle. Matched and BattleStart must agree on it
     readonly Dictionary<string, Session> _firstPlayer = new();
@@ -49,7 +49,7 @@ public sealed class BattleHub
     readonly Dictionary<string, Dictionary<int, int>> _charges = new();
     readonly HashSet<string> _costBlind = new();
 
-    public BattleHub(SessionManager sessions, BattleDeckStore decks, Dictionary<int, int>? baseCardIds = null,
+    public BattleHub(SessionManager sessions, IBattleDeckStore decks, Dictionary<int, int>? baseCardIds = null,
         Dictionary<int, CardCost>? cardCosts = null)
     {
         _sessions = sessions;

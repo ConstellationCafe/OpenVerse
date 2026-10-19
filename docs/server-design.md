@@ -38,10 +38,14 @@ JpnとEngの2言語をHTTPヘッダ`LANGUAGE`で切り替えます．
 
 ## ネットワーク
 
-各マシンでhostsの`utoongaize.shadowverse.jp`をサーバーに向けます．手段はホストとなる人が選べます:
+各マシンでhostsの`utoongaize.shadowverse.jp`を自分の127.0.0.1に向け，APIは各プレイヤーのPCで動かします．カードマスタ，アセット，デッキは各自のクライアントのものを使います．
 
-- VPN (ポート開放が不要)
-- 固定ホスト (ポート開放やDDNSが必要)
+ルームマッチは2通りです:
+
+- 単独: ランチャーの隣に`be_url.txt`が無い場合．ルームもバトルサーバーもそのPC内で完結します (開発・テスト用)
+- 中央: `be_url.txt`に[OpenVerseBE](https://github.com/ConstellationCafe/OpenVerseBE)のアドレスを書いた場合．`open_room/*`だけがOpenVerseBEへ送られ，ルームはRedisに置かれます．バトルは同じサーバーの`OpenVerse.Battle`がRedisからデッキを読んで中継します．VPNは不要で，サーバー側でポート開放 (443，3001) が必要です
+
+中央では，席の判定に使う接続元IPはOpenVerseBEが記録します (各プレイヤーのAPIからのリクエストの送信元＝そのプレイヤーの公開IP)．`cafe_key.txt`はサーバーの`OVBE_CAFE_KEY`と同じ値で，登録を身内に限るためのものです．
 
 APIとCDNはHTTPS固定ですが，クライアントは証明書を検証しないので自己署名証明書がそのまま通ります．クライアント改変もmkcertも要らず，証明書はランチャーが生成します．
 

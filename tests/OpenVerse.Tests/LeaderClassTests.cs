@@ -23,7 +23,8 @@ public class LeaderClassTests : IDisposable
         _decks = new DeckStore(_dbPath);
         _battleDecks = new BattleDeckStore(_dbPath);
         _rooms = new RoomStore();
-        _handler = new RoomHandler(_rooms, new UserStore(), _decks, _battleDecks);
+        var users = new UserStore();
+        _handler = new RoomHandler(new LocalRoomBackend(_rooms, users, _battleDecks), users, _decks);
     }
 
     public void Dispose()
@@ -40,8 +41,8 @@ public class LeaderClassTests : IDisposable
     {
         _decks.Save(new Deck { UserKey = Owner, DeckNo = 1, Format = 2, ClassId = storedClass, CardIdArray = cards });
         var room = _rooms.Create(Owner, 1, 1, 2, 0, false, false);
-        _handler.Handle("/shadowverse/open_room/set_deck", """{"deck_no":1}""", Owner);
-        _handler.Handle("/shadowverse/open_room_battle/do_matching", "{}", Owner);
+        _handler.HandleAsync("/shadowverse/open_room/set_deck", """{"deck_no":1}""", Owner).GetAwaiter().GetResult();
+        _handler.HandleAsync("/shadowverse/open_room_battle/do_matching", "{}", Owner).GetAwaiter().GetResult();
         return room.RoomId;
     }
 

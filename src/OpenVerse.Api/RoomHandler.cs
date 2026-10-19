@@ -4,53 +4,55 @@ using OpenVerse.Common;
 
 namespace OpenVerse.Api;
 
+// Shapes the client's open_room/* and open_room_battle/* responses. Where the rooms actually live is the backend's
+// business (RoomBackend.cs): this process standalone, OpenVerseBE centrally
 public sealed class RoomHandler
 {
-    readonly RoomStore _rooms;
+    readonly IRoomBackend _backend;
     readonly UserStore _users;
     readonly DeckStore _decks;
-    readonly BattleDeckStore _battleDecks;
-    // each participant's deck_no from set_deck, resolved to the shared battle_deck table at do_matching
+    // each participant's deck_no from set_deck, resolved against this PC's own deck store at do_matching
     readonly ConcurrentDictionary<string, int> _deckByUdid = new();
 
-    public RoomHandler(RoomStore rooms, UserStore users, DeckStore decks, BattleDeckStore battleDecks)
+    public RoomHandler(IRoomBackend backend, UserStore users, DeckStore decks)
     {
-        _rooms = rooms;
+        _backend = backend;
         _users = users;
         _decks = decks;
-        _battleDecks = battleDecks;
     }
 
     public static bool CanHandle(string path) =>
         path.StartsWith("/shadowverse/open_room/", StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith("/shadowverse/open_room_battle/", StringComparison.OrdinalIgnoreCase);
 
-    public string Handle(string path, string reqJson, string ownerUdid, string sourceIp = "")
+    public async Task<string> HandleAsync(string path, string reqJson, string ownerUdid, string sourceIp = "")
     {
-        if (sourceIp.Length > 0) _ipByUdid[ownerUdid] = sourceIp;
-        return HandleCore(path, reqJson, ownerUdid);
+        _backend.NoteSourceIp(ownerUdid, sourceIp);
+        try { return await HandleCore(path, reqJson, ownerUdid); }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            // the matching server is down or refused us. say so loudly: to the player it just looks like a dead room
+            Console.WriteLine($"  [room] OpenVerseBE unreachable or refused ({e.Message})");
+            return JsonSerializer.Serialize(new { result_reason = -1, room_result = 0 });
+        }
     }
 
-    // the API is the only side that sees where a request came from, and it is the only discriminator both processes
-    // can agree on: the client picks its own viewer_id and two installs have been seen picking the same one
-    readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _ipByUdid = new();
-
-    string HandleCore(string path, string reqJson, string ownerUdid)
+    async Task<string> HandleCore(string path, string reqJson, string udid)
     {
         using var doc = JsonDocument.Parse(reqJson);
         var root = doc.RootElement;
         var name = path[(path.LastIndexOf('/') + 1)..];
         return name switch
         {
-            "create_room" => Create(ownerUdid, root),
-            "enter_room" => Enter(ownerUdid, root),
-            "leave_room" => Leave(root),
-            "close_room" => Close(ownerUdid),
-            "force_release_room" => ForceRelease(ownerUdid),
-            "initialize_room_battle" => InitializeBattle(root),
-            "do_matching" => DoMatching(ownerUdid),
+            "create_room" => await Create(udid, root),
+            "enter_room" => await Enter(udid, root),
+            "leave_room" => await Leave(udid, root),
+            "close_room" => await Close(udid),
+            "force_release_room" => await ForceRelease(udid),
+            "initialize_room_battle" => await InitializeBattle(udid, root),
+            "do_matching" => await DoMatching(udid),
             // set_deck carries the participant's chosen deck_no. stash it so do_matching can resolve the real deck
-            "set_deck" => SetDeck(ownerUdid, root),
+            "set_deck" => SetDeck(udid, root),
             "deck_entry" or "ban_deck" or "finish_load"
                 => JsonSerializer.Serialize(new { result_reason = 0 }),
             "finish" or "force_finish" => Finish(root),
@@ -77,16 +79,16 @@ public sealed class RoomHandler
         });
 
     // open_room_battle/do_matching: the room already holds the battle server + id (from create/enter), so report success.
-    // also resolve this participant's chosen deck and hand it to the Battle process via the shared battle_deck table
-    string DoMatching(string udid)
+    // also resolve this participant's chosen deck and hand it to the battle server through the backend
+    async Task<string> DoMatching(string udid)
     {
-        var room = _rooms.FindByUser(udid);
+        var room = await _backend.Mine(udid);
         if (room is null)
             return JsonSerializer.Serialize(new { matching_state = 0, retry_period = 1, timeout_period = 60 });
-        WriteBattleDeck(room, udid);
+        await WriteBattleDeck(room, udid);
         return JsonSerializer.Serialize(new
         {
-            matching_state = room.OwnerUdid == udid ? 3007 : 3004,
+            matching_state = room.IsOwner ? 3007 : 3004,
             timeout_period = 60,
             retry_period = 1,
             battle_id = room.BattleId,
@@ -98,7 +100,7 @@ public sealed class RoomHandler
         });
     }
 
-    void WriteBattleDeck(Room room, string udid)
+    async Task WriteBattleDeck(RoomInfo room, string udid)
     {
         if (!_deckByUdid.TryGetValue(udid, out var deckNo))
         {
@@ -106,16 +108,13 @@ public sealed class RoomHandler
             return;
         }
         var deck = _decks.Get(udid, deckNo);
-        var isOwner = room.OwnerUdid == udid;
-        Console.WriteLine($"WriteBattleDeck udid={udid} roomId={room.RoomId} isOwner={isOwner} deckNo={deckNo} found={deck is not null} cards={deck?.CardIdArray.Length ?? 0}");
+        Console.WriteLine($"WriteBattleDeck udid={udid} roomId={room.RoomId} isOwner={room.IsOwner} deckNo={deckNo} found={deck is not null} cards={deck?.CardIdArray.Length ?? 0}");
         if (deck is null) return;
         // Counting cards only guesses, and a deck that mixes classes makes the guess pick the majority, so the
         // leader turns into a class the player never chose
         var classId = deck.ClassId is >= 1 and <= 8 ? deck.ClassId : ClassOf(deck.CardIdArray);
-        _battleDecks.Set(new BattleDeck
+        await _backend.SaveDeck(udid, room, new BattleDeck
         {
-            RoomId = room.RoomId,
-            IsOwner = isOwner,
             ClassId = classId,
             SubClassId = deck.SubClassId,
             // default leader chara_id equals class_id for the 8 base classes, and GetClassPrm throws on 0/-1
@@ -124,7 +123,6 @@ public sealed class RoomHandler
             LeaderSkinId = deck.LeaderSkinId,
             CardIds = deck.CardIdArray,
             UserName = _users.GetOrCreate(udid).Name,
-            SourceIp = _ipByUdid.GetValueOrDefault(udid, ""),
         });
     }
 
@@ -136,17 +134,16 @@ public sealed class RoomHandler
         return digits.Count > 0 ? digits.GroupBy(d => d).OrderByDescending(g => g.Count()).First().Key : 1;
     }
 
-    string Create(string ownerUdid, JsonElement root)
+    async Task<string> Create(string udid, JsonElement root)
     {
-        _users.GetOrCreate(ownerUdid);
-        var room = _rooms.Create(
-            ownerUdid,
+        _users.GetOrCreate(udid);
+        var room = await _backend.Create(udid, new RoomSettings(
             GetInt(root, "battle_type"),
             GetInt(root, "battle_rule"),
             GetInt(root, "deck_format"),
             GetInt(root, "two_pick_type"),
             GetInt(root, "can_friend_watch") == 1,
-            GetInt(root, "can_guild_watch") == 1);
+            GetInt(root, "can_guild_watch") == 1));
         return JsonSerializer.Serialize(new
         {
             room_id = room.RoomId,
@@ -158,14 +155,18 @@ public sealed class RoomHandler
         });
     }
 
-    string Enter(string visitorUdid, JsonElement root)
+    async Task<string> Enter(string visitorUdid, JsonElement root)
     {
         var roomId = GetString(root, "room_id") ?? "";
-        var room = _rooms.Enter(visitorUdid, roomId);
-        if (room is null)
-            return JsonSerializer.Serialize(new { result_reason = -3 });
-        var owner = _users.GetOrCreate(room.OwnerUdid);
         _users.GetOrCreate(visitorUdid);
+        var (outcome, room) = await _backend.Enter(visitorUdid, roomId);
+        if (outcome != EnterOutcome.Ok || room is null)
+        {
+            Console.WriteLine($"  [room] enter {roomId}: {outcome}");
+            return JsonSerializer.Serialize(new { result_reason = -3 });
+        }
+        // only the owner's id and name cross machines; the rest of the card is the same blank profile it always was
+        var owner = new UserProfile { ViewerId = room.Owner.ViewerId, Name = room.Owner.Name };
         return JsonSerializer.Serialize(new
         {
             result_reason = 0,
@@ -195,29 +196,27 @@ public sealed class RoomHandler
         });
     }
 
-    string Leave(JsonElement root)
+    async Task<string> Leave(string udid, JsonElement root)
     {
-        _rooms.Leave(GetString(root, "room_id") ?? "");
+        await _backend.Leave(udid, GetString(root, "room_id") ?? "");
         return JsonSerializer.Serialize(new { result_reason = 0, room_result = 1 });
     }
 
-    string Close(string ownerUdid)
+    async Task<string> Close(string udid)
     {
-        var room = _rooms.FindByOwner(ownerUdid);
-        if (room is not null) _rooms.Close(room.RoomId);
+        await _backend.CloseMine(udid);
         return "{}";
     }
 
-    string ForceRelease(string ownerUdid)
+    async Task<string> ForceRelease(string udid)
     {
-        var room = _rooms.FindByOwner(ownerUdid);
-        if (room is not null) _rooms.Close(room.RoomId);
+        await _backend.CloseMine(udid);
         return JsonSerializer.Serialize(new { room_result = 1 });
     }
 
-    string InitializeBattle(JsonElement root)
+    async Task<string> InitializeBattle(string udid, JsonElement root)
     {
-        var room = _rooms.Get(GetString(root, "room_id") ?? "");
+        var room = await _backend.Get(udid, GetString(root, "room_id") ?? "");
         return JsonSerializer.Serialize(new
         {
             battle_id = room?.BattleId ?? "",

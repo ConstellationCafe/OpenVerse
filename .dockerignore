@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.git/
+.github/
+release/
+publish/
+TestResults/
+openverse_log/
+OpenVerse.zip
+*.exe
+*.db

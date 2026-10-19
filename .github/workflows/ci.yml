@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-22.04
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet build OpenVerse.slnx -c Release
+      # the engine and card master are not in the repo, so the engine half of the suite skips itself here
+      - run: dotnet test tests/OpenVerse.Tests/OpenVerse.Tests.csproj -c Release --no-build --logger trx --results-directory TestResults
+        continue-on-error: true
+        env:
+          OPENVERSE_TEST_REDIS: 127.0.0.1:6379
+      - run: bash .github/scripts/test-summary.sh TestResults .github/known-ci-failures.txt
+      # the battle server for the central (OpenVerseBE) setup, ready to copy to a Linux host
+      - run: dotnet publish src/OpenVerse.Battle/OpenVerse.Battle.csproj -c Release -r linux-x64 --self-contained false -o publish/battle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openverse-battle-linux-x64
+          path: publish/battle

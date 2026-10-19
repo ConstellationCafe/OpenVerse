@@ -53,7 +53,10 @@ public partial class BattleServer
             ?? Path.Combine(AppContext.BaseDirectory, "openverse.db");
         // same data dir the API serves the card master from (both processes run from the release dir)
         var dataDir = Path.Combine(AppContext.BaseDirectory, "data");
-        var hub = new BattleHub(sessions, new BattleDeckStore(dbPath), BaseCardIdMap.Load(dataDir), CardCostMap.Load(dataDir));
+        // central mode reads the decks OpenVerseBE wrote to Redis; standalone shares the SQLite file with a local API
+        var (redisDecks, gate) = RedisSetup.FromEnvironment();
+        IBattleDeckStore decks = redisDecks ?? new BattleDeckStore(dbPath);
+        var hub = new BattleHub(sessions, decks, BaseCardIdMap.Load(dataDir), CardCostMap.Load(dataDir));
 
         // The client's own battle engine, running headless. Loading is separate from trusting it: how far it is
         // believed comes from engine.txt, and a host without the (non-redistributable) assemblies just relays as before
@@ -71,8 +74,14 @@ public partial class BattleServer
             catch { viewerId = viewerIdEnc; }
 
             Console.WriteLine($"WS connect: battleId={battleId} viewerId={viewerId} UA={userAgent}");
+            if (gate is not null && !await gate.RoomExists(battleId))
+            {
+                Console.WriteLine($"WS refused: room {battleId} was not opened by OpenVerseBE");
+                ctx.Response.StatusCode = 403;
+                return;
+            }
             var ws = await ctx.WebSockets.AcceptWebSocketAsync();
-            var session = new Session(ws, battleId, viewerId) { RemoteIp = ctx.Connection.RemoteIpAddress?.ToString() ?? "" };
+            var session = new Session(ws, battleId, viewerId) { RemoteIp = NormalizeIp(ctx.Connection.RemoteIpAddress) };
             session.OnEvent += (s, pkt, bin) =>
             {
                 if (Session.Chatty || pkt.EventName is not "alive")
@@ -97,6 +106,11 @@ public partial class BattleServer
 
         return app;
     }
+
+    // The seat check compares this with the address OpenVerseBE (or the local API) recorded. a dual-stack listener
+    // reports an IPv4 client as ::ffff:a.b.c.d, which would never equal the plain a.b.c.d recorded on the other side
+    public static string NormalizeIp(System.Net.IPAddress? ip) =>
+        ip is null ? "" : (ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip).ToString();
 
     static async Task Observe(Task work, Session s, string what)
     {

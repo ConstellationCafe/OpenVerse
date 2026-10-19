@@ -1,0 +1,11 @@
+# Tests that already fail on main in CI, before any change on this branch (measured on the ci-baseline branch).
+# They need data that is not in the repo (the card master / manifests each host extracts with openverse-setup), so
+# they cannot pass on a clean checkout. CI reports them but only fails on a failure NOT listed here.
+OpenVerse.Tests.UnlockApiTests.PressingItTwicePutsEverythingBack
+OpenVerse.Tests.UnlockApiTests.TheCardMasterItselfChanges
+OpenVerse.Tests.UnlockApiTests.PressingTheGuildButtonRaisesTheCopyCapAndTheOwnedCount
+OpenVerse.Tests.UnlockApiTests.WithTheSwitchOffBothMastersKeepTheirClans
+OpenVerse.Tests.UnlockApiTests.OnlyTheEditorsMasterLosesTheClan
+OpenVerse.Tests.UnlockApiTests.BeforeTheSwitchNothingIsRelaxed
+OpenVerse.Tests.UnlockApiTests.TheCardMasterHashMovesWithTheSwitch
+OpenVerse.Tests.DeckApiTests.LoadIndexGrantsSleevesAndAlt
