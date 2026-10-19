@@ -197,7 +197,7 @@ RemoteRoomBackend? remoteRooms = string.IsNullOrWhiteSpace(beUrl)
     : new RemoteRoomBackend(new Uri(beUrl.TrimEnd('/') + "/"),
         Environment.GetEnvironmentVariable("OPENVERSE_CAFE_KEY") ?? "",
         udid => users.GetOrCreate(udid).Name);
-IRoomBackend roomBackend = remoteRooms ?? new LocalRoomBackend(rooms, users, battleDeckStore);
+IRoomBackend roomBackend = (IRoomBackend?)remoteRooms ?? new LocalRoomBackend(rooms, users, battleDeckStore);
 Console.WriteLine(remoteRooms is null ? "Rooms: standalone (in this process)" : $"Rooms: central, OpenVerseBE at {beUrl}");
 var roomHandler = new RoomHandler(roomBackend, users, deckStore);
 
