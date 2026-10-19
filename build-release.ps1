@@ -1,3 +1,11 @@
+# -BeUrl / -CafeKey prefill be_url.txt and cafe_key.txt in the release, so a group's zip points at its own matching
+# server out of the box. -NoCardMaster builds without a card master (CI has none to give): the zip never carries one
+# anyway, each player extracts their own with openverse-setup
+param(
+  [string]$BeUrl = "",
+  [string]$CafeKey = "",
+  [switch]$NoCardMaster
+)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -57,6 +65,7 @@ if (-not (Test-Path (Join-Path $stash "data/card_master_full.csv.gz"))) {
     Copy-Item $seed (Join-Path $stash "data/card_master_full.csv.gz") -Force
     Write-Host "card_master: seeded the stash from src/OpenVerse.Api/data"
   }
+  elseif ($NoCardMaster) { Write-Host "card_master: none (-NoCardMaster); the zip never includes it, players run openverse-setup" }
   else { throw "no card_master_full.csv.gz in release/, the stash, or src/OpenVerse.Api/data - run openverse-setup" }
 }
 
@@ -91,13 +100,17 @@ Get-ChildItem $rel, $srv -File | Where-Object {
 } | Remove-Item -Force
 
 $keepComment = "# Lines starting with # are ignored, so this one can stay"
-Set-Content -Path (Join-Path $rel "be_url.txt") -Encoding UTF8 -Value @(
+$beUrlLines = @(
   "# Put the matching server's address on one line below (e.g. https://ov.example.com) to meet players anywhere."
   "# Leave it empty to keep rooms and battles on this machine"
   $keepComment)
-Set-Content -Path (Join-Path $rel "cafe_key.txt") -Encoding UTF8 -Value @(
+if ($BeUrl) { $beUrlLines += $BeUrl.Trim() }
+Set-Content -Path (Join-Path $rel "be_url.txt") -Encoding UTF8 -Value $beUrlLines
+$cafeKeyLines = @(
   "# Put the key the matching server's owner gave you on one line below. Leave it empty if the server has none"
   $keepComment)
+if ($CafeKey) { $cafeKeyLines += $CafeKey.Trim() }
+Set-Content -Path (Join-Path $rel "cafe_key.txt") -Encoding UTF8 -Value $cafeKeyLines
 Set-Content -Path (Join-Path $rel "username.txt") -Encoding UTF8 -Value @(
   "# Put your in-game name on one line below. Leave it empty to use your Steam name"
   $keepComment)
