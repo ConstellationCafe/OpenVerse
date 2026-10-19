@@ -2,6 +2,7 @@ name: release-zip
 
 # The zip players download: built on Windows (the launcher and setup are Windows programs) whenever main changes,
 # i.e. when a pull request is merged, and on pull requests into main so a broken build shows up before the merge.
+# Only a push to main publishes it to the Releases page; pull requests just build and check it.
 on:
   push:
     branches: ["main"]
@@ -55,3 +56,55 @@ jobs:
           name: OpenVerse-${{ github.event_name == 'pull_request' && format('pr{0}', github.event.number) || github.sha }}
           path: dist/OpenVerse
           retention-days: 90
+
+      # the zip itself, for the publish job below
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: release-zip
+          path: OpenVerse.zip
+          retention-days: 7
+
+  # A release per merge, with the zip attached as OpenVerse.zip, so players need no GitHub account and one link always
+  # gives the newest: https://github.com/<owner>/<repo>/releases/latest/download/OpenVerse.zip
+  publish:
+    needs: zip
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    # the only job allowed to write: creating the release and its tag
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-zip
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test -f OpenVerse.zip
+          day=$(TZ=Asia/Seoul date +%Y.%m.%d)
+          short=${SHA::7}
+          tag="v${day}-${short}"
+          {
+            echo "## 설치"
+            echo
+            echo "1. \`OpenVerse.zip\`을 받아 압축을 풉니다."
+            echo "2. \`openverse-setup.exe\`를 실행합니다. (처음 한 번. 셰도우버스 클라이언트에서 카드 데이터를 추출합니다)"
+            echo "3. \`openverse-launcher.exe\`를 실행합니다. 관리자 권한 요청은 허용합니다."
+            echo
+            echo "\`be_url.txt\`는 \`${BE_URL}\`로 설정되어 있습니다. \`cafe_key.txt\`는 비어 있습니다."
+            echo
+            echo "항상 최신판: https://github.com/${REPO}/releases/latest/download/OpenVerse.zip"
+            echo
+          } > notes.md
+          gh release create "$tag" OpenVerse.zip \
+            --repo "$REPO" --target "$SHA" \
+            --title "OpenVerse ${day} (${short})" \
+            --notes-file notes.md --generate-notes --latest
+          echo "::notice title=release::https://github.com/${REPO}/releases/tag/${tag}"
