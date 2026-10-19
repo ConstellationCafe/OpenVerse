@@ -50,6 +50,72 @@ jobs:
           $mb = [math]::Round((Get-Item OpenVerse.zip).Length / 1MB, 1)
           Write-Output "::notice title=zip::OpenVerse.zip $mb MB, be_url=$url, cafe_key empty"
 
+      - name: Build the installer
+        shell: pwsh
+        run: >-
+          dotnet publish tools/OpenVerse.Installer/OpenVerse.Installer.csproj -c Release -r win-x64
+          --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -o dist/installer
+
+      # Runs the installer the way a player would, against the zip just built and against the newest real release
+      - name: Check the installer
+        shell: pwsh
+        env:
+          OPENVERSE_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = (Resolve-Path dist/installer/OpenVerse-Installer.exe).Path
+          function Run([string[]]$a) { & $exe @a | Out-Host; return $LASTEXITCODE }
+          function Must([bool]$ok, [string]$why) { if (-not $ok) { throw $why } }
+          function SettingValue($f) { Get-Content $f | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") } | Select-Object -First 1 }
+
+          # a stand-in card master (a gzip'd CSV over 100 rows): the real one is never in CI
+          $fake = Join-Path $env:RUNNER_TEMP "fake_card_master.csv.gz"
+          $fs = [IO.File]::Create($fake)
+          $gz = New-Object IO.Compression.GZipStream($fs, [IO.Compression.CompressionMode]::Compress)
+          $w = New-Object IO.StreamWriter($gz)
+          1..150 | ForEach-Object { $w.WriteLine("$_,card") }
+          $w.Close()
+
+          # 1. fresh install from the zip just built, card master given, shortcut made
+          $d1 = Join-Path $env:RUNNER_TEMP "ov-install"
+          $desk = Join-Path $env:RUNNER_TEMP "desk"; New-Item -ItemType Directory -Force $desk | Out-Null
+          Must ((Run @("--zip", "OpenVerse.zip", "--tag", "ci1", "--dir", $d1, "--card-master", $fake, "--yes", "--shortcut-dir", $desk)) -eq 0) "fresh install failed"
+          foreach ($f in "openverse-launcher.exe", "openverse-setup.exe", "server/OpenVerse.Api.exe", "server/data/card_master_full.csv.gz") {
+            Must (Test-Path (Join-Path $d1 $f)) "missing after install: $f"
+          }
+          Must ((Get-Content (Join-Path $d1 "installed-version.txt")) -eq "ci1") "version not recorded"
+          Must ((SettingValue (Join-Path $d1 "be_url.txt")) -eq $env:BE_URL) "be_url.txt not as released"
+          Must (Test-Path (Join-Path $desk "OpenVerse.lnk")) "no shortcut"
+
+          # 2. update over it: the card master and a filled-in setting survive, the version moves
+          Add-Content (Join-Path $d1 "cafe_key.txt") "player-key"
+          Must ((Run @("--zip", "OpenVerse.zip", "--tag", "ci2", "--dir", $d1, "--yes", "--no-shortcut")) -eq 0) "update failed"
+          Must (Test-Path (Join-Path $d1 "server/data/card_master_full.csv.gz")) "update lost the card master"
+          Must ((SettingValue (Join-Path $d1 "cafe_key.txt")) -eq "player-key") "update lost cafe_key.txt"
+          Must ((Get-Content (Join-Path $d1 "installed-version.txt")) -eq "ci2") "update did not record the version"
+
+          # 3. a PC with no client cache and no file given: installed, but says the card master is missing (exit 2)
+          $d2 = Join-Path $env:RUNNER_TEMP "ov-nocache"
+          Must ((Run @("--zip", "OpenVerse.zip", "--dir", $d2, "--yes", "--no-shortcut")) -eq 2) "missing card master not reported"
+          Must (Test-Path (Join-Path $d2 "openverse-launcher.exe")) "nothing installed without a card master"
+
+          # 4. the real thing: newest release downloaded from GitHub
+          $d3 = Join-Path $env:RUNNER_TEMP "ov-download"
+          Must ((Run @("--dir", $d3, "--card-master", $fake, "--yes", "--no-shortcut")) -eq 0) "install from the latest release failed"
+          $v = Get-Content (Join-Path $d3 "installed-version.txt")
+          Must ($v -like "v*") "unexpected release version '$v'"
+          Must (Test-Path (Join-Path $d3 "server/OpenVerse.Api.exe")) "downloaded release not unpacked"
+
+          $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Output "::notice title=installer::OpenVerse-Installer.exe $mb MB: install, update, no-card-master and download-from-release ($v) all passed"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenVerse-Installer-${{ github.event_name == 'pull_request' && format('pr{0}', github.event.number) || github.sha }}
+          path: dist/installer/OpenVerse-Installer.exe
+          retention-days: 90
+
       - uses: actions/upload-artifact@v4
         with:
           # downloading the artifact gives the zip contents directly (no zip inside a zip)
@@ -57,12 +123,14 @@ jobs:
           path: dist/OpenVerse
           retention-days: 90
 
-      # the zip itself, for the publish job below
+      # the zip and the installer, for the publish job below
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: release-zip
-          path: OpenVerse.zip
+          path: |
+            OpenVerse.zip
+            dist/installer/OpenVerse-Installer.exe
           retention-days: 7
 
   # A release per merge, with the zip attached as OpenVerse.zip, so players need no GitHub account and one link always
@@ -88,11 +156,21 @@ jobs:
         run: |
           set -euo pipefail
           test -f OpenVerse.zip
+          test -f dist/installer/OpenVerse-Installer.exe
           day=$(TZ=Asia/Seoul date +%Y.%m.%d)
           short=${SHA::7}
           tag="v${day}-${short}"
           {
-            echo "## 설치"
+            echo "## 설치 (권장)"
+            echo
+            echo "1. \`OpenVerse-Installer.exe\`를 받아 실행합니다."
+            echo "2. 셰도우버스 카드 데이터 캐시가 없는 PC라면 파일 선택 창이 뜹니다. 카페에서 받은 \`card_master_full.csv.gz\`를 고릅니다."
+            echo "3. 바탕화면의 **OpenVerse** 바로가기로 실행합니다. 관리자 권한 요청은 허용합니다."
+            echo
+            echo "업데이트할 때도 인스톨러를 다시 실행하면 됩니다. 카드 마스터와 설정은 유지됩니다."
+            echo "Windows가 '알 수 없는 게시자' 경고를 띄우면 '추가 정보' → '실행'을 누릅니다. (서명되지 않은 exe라서 뜹니다)"
+            echo
+            echo "## 수동 설치"
             echo
             echo "1. \`OpenVerse.zip\`을 받아 압축을 풉니다."
             echo "2. \`openverse-setup.exe\`를 실행합니다. (처음 한 번. 셰도우버스 클라이언트에서 카드 데이터를 추출합니다)"
@@ -103,10 +181,11 @@ jobs:
             echo
             echo "\`be_url.txt\`는 \`${BE_URL}\`로 설정되어 있습니다. \`cafe_key.txt\`는 비어 있습니다."
             echo
-            echo "항상 최신판: https://github.com/${REPO}/releases/latest/download/OpenVerse.zip"
+            echo "항상 최신 인스톨러: https://github.com/${REPO}/releases/latest/download/OpenVerse-Installer.exe"
+            echo "항상 최신 zip: https://github.com/${REPO}/releases/latest/download/OpenVerse.zip"
             echo
           } > notes.md
-          gh release create "$tag" OpenVerse.zip \
+          gh release create "$tag" OpenVerse.zip dist/installer/OpenVerse-Installer.exe \
             --repo "$REPO" --target "$SHA" \
             --title "OpenVerse ${day} (${short})" \
             --notes-file notes.md --generate-notes --latest
