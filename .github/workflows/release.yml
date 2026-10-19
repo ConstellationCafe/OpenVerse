@@ -1,0 +1,57 @@
+name: release-zip
+
+# The zip players download: built on Windows (the launcher and setup are Windows programs) whenever main changes,
+# i.e. when a pull request is merged, and on pull requests into main so a broken build shows up before the merge.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # be_url.txt in the zip points here out of the box. cafe_key.txt is left empty
+  BE_URL: https://constellationcafe.p-e.kr/openverse
+
+jobs:
+  zip:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # no card master here: the zip never carries one, each player extracts their own with openverse-setup
+      - name: Build release
+        shell: pwsh
+        run: ./build-release.ps1 -NoCardMaster -BeUrl "$env:BE_URL"
+
+      - name: Check the zip
+        shell: pwsh
+        run: |
+          Expand-Archive OpenVerse.zip -DestinationPath dist/OpenVerse -Force
+          $root = "dist/OpenVerse"
+          foreach ($f in "openverse-launcher.exe", "openverse-setup.exe", "be_url.txt", "cafe_key.txt", "username.txt",
+                         "server/OpenVerse.Api.exe", "server/OpenVerse.Battle.exe") {
+            if (-not (Test-Path (Join-Path $root $f))) { throw "missing from the zip: $f" }
+          }
+          $url = Get-Content (Join-Path $root "be_url.txt") | ForEach-Object { $_.Trim() } |
+                 Where-Object { $_ -and -not $_.StartsWith("#") } | Select-Object -First 1
+          if ($url -ne $env:BE_URL) { throw "be_url.txt reads '$url', expected '$env:BE_URL'" }
+          $key = Get-Content (Join-Path $root "cafe_key.txt") | ForEach-Object { $_.Trim() } |
+                 Where-Object { $_ -and -not $_.StartsWith("#") }
+          if ($key) { throw "cafe_key.txt should be empty, reads '$key'" }
+          $mb = [math]::Round((Get-Item OpenVerse.zip).Length / 1MB, 1)
+          Write-Output "::notice title=zip::OpenVerse.zip $mb MB, be_url=$url, cafe_key empty"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          # downloading the artifact gives the zip contents directly (no zip inside a zip)
+          name: OpenVerse-${{ github.event_name == 'pull_request' && format('pr{0}', github.event.number) || github.sha }}
+          path: dist/OpenVerse
+          retention-days: 90
