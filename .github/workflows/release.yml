@@ -98,6 +98,9 @@ jobs:
             echo "2. \`openverse-setup.exe\`를 실행합니다. (처음 한 번. 셰도우버스 클라이언트에서 카드 데이터를 추출합니다)"
             echo "3. \`openverse-launcher.exe\`를 실행합니다. 관리자 권한 요청은 허용합니다."
             echo
+            echo "setup이 \`cache not found\`로 실패하면 (서비스 종료 전에 그 PC로 셰도우버스를 하지 않았거나, 이미 OpenVerse를 실행한 PC):"
+            echo "setup이 성공한 사람에게 \`card_master_full.csv.gz\`를 받아 압축 푼 폴더의 \`server\\data\\\` 안에 넣고 런처를 실행하면 됩니다."
+            echo
             echo "\`be_url.txt\`는 \`${BE_URL}\`로 설정되어 있습니다. \`cafe_key.txt\`는 비어 있습니다."
             echo
             echo "항상 최신판: https://github.com/${REPO}/releases/latest/download/OpenVerse.zip"
