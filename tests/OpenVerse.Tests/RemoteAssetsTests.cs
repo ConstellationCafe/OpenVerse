@@ -21,6 +21,8 @@ sealed class FakeAssetServer : HttpMessageHandler
     public bool NotConfigured;
     public bool Down;
     public int BusyFor;           // answer this many requests with 503 first, as nginx's limiter does
+    public int QueuedFor;         // answer this many file requests with 429 queued (position counting down) first
+    public readonly ConcurrentQueue<string> DownloadIds = new();
     public TimeSpan FileDelay;
     public string[] ExtraListNames = [];
     int _inFlight;
@@ -65,6 +67,14 @@ sealed class FakeAssetServer : HttpMessageHandler
         }
         if (path.StartsWith("/v1/assets/files/"))
         {
+            if (req.Headers.TryGetValues("X-OV-Download-Id", out var ids)) DownloadIds.Enqueue(ids.First());
+            var left = Interlocked.Decrement(ref QueuedFor);
+            if (left >= 0)
+                return new HttpResponseMessage((HttpStatusCode)429)
+                {
+                    Content = new StringContent(JsonSerializer.Serialize(new
+                    { error = "queued", position = Math.Min(left / 10 + 1, 9), active = 2, waiting = 3, max_active = 2 })),
+                };
             var now = Interlocked.Increment(ref _inFlight);
             lock (this) MaxInFlight = Math.Max(MaxInFlight, now);
             try
@@ -100,6 +110,8 @@ public class RemoteAssetsTests : IDisposable
         {
             RetryDelay = TimeSpan.FromMilliseconds(1),
             Attempts = 4,
+            FileAttempts = 4,
+            QueuePoll = TimeSpan.FromMilliseconds(1),
         };
 
     static byte[] B(string s) => Encoding.UTF8.GetBytes(s);
@@ -192,6 +204,36 @@ public class RemoteAssetsTests : IDisposable
         Assert.True(await Client().Relay(Md5(bundle), ctx.Response, CancellationToken.None));
         Assert.Equal(bundle, Written(ctx));
         Assert.Equal(3, _server.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Waiting_in_the_servers_line_never_gives_up()
+    {
+        var bundle = B("a fresh install's card art");
+        _server.Files[Md5(bundle)] = bundle;
+        // far more queued answers than FileAttempts: the line is not a failure
+        _server.QueuedFor = 25;
+        var client = Client();
+        var ctx = Context();
+        Assert.True(await client.Relay(Md5(bundle), ctx.Response, CancellationToken.None));
+        Assert.Equal(bundle, Written(ctx));
+        // every request carried the same id, so the server keeps this PC's place
+        Assert.Equal(26, _server.DownloadIds.Count);
+        Assert.All(_server.DownloadIds, id => Assert.Equal(client.DownloadId, id));
+        // the position is shown when it changes, not on every poll, and the turn is announced
+        Assert.Equal(3, _log.Count(l => l.Contains("다운로드 대기 중")));
+        Assert.Contains(_log, l => l.Contains("차례가 왔습니다"));
+    }
+
+    [Fact]
+    public async Task A_server_that_stays_down_is_given_up_on()
+    {
+        var bundle = B("x");
+        _server.Files[Md5(bundle)] = bundle;
+        _server.BusyFor = 100;
+        var ctx = Context();
+        Assert.False(await Client().Relay(Md5(bundle), ctx.Response, CancellationToken.None));
+        Assert.Contains(_log, l => l.Contains("giving up after 4 tries"));
     }
 
     [Fact]
