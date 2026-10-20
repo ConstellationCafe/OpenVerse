@@ -31,7 +31,9 @@ sealed class FakeAssetServer : HttpMessageHandler
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, CancellationToken ct)
     {
         if (Down) throw new HttpRequestException("connection refused");
+        // players' be_url is the shared domain's /openverse path; the server's own routes start after it
         var path = req.RequestUri!.AbsolutePath;
+        if (path.StartsWith("/openverse/")) path = path["/openverse".Length..];
         Requests.Enqueue(path);
         if (RequiredCafeKey is not null &&
             (!req.Headers.TryGetValues("X-OV-Cafe-Key", out var k) || k.FirstOrDefault() != RequiredCafeKey))
