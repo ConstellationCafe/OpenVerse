@@ -44,6 +44,7 @@ JpnとEngの2言語をHTTPヘッダ`LANGUAGE`で切り替えます．
 
 - 単独: ランチャーの隣に`be_url.txt`が無い場合．ルームもバトルサーバーもそのPC内で完結します (開発・テスト用)
 - 中央: `be_url.txt`に[OpenVerseBE](https://github.com/ConstellationCafe/OpenVerseBE)のアドレスを書いた場合．`open_room/*`だけがOpenVerseBEへ送られ，ルームはRedisに置かれます．バトルは同じサーバーの`OpenVerse.Battle`がRedisからデッキを読んで中継します．VPNは不要で，サーバー側でポート開放 (443，3001) が必要です
+  - 中央モードでは，このPCのShadowverseフォルダ (`LocalLow\Cygames\Shadowverse`) に無いアセットだけをOpenVerseBEの`/v1/assets/*`から取得して中継します (同時2本まで)．マニフェストはサーバーのものを取得し，このPCにあるファイルの行だけローカルのハッシュに書き換えます．カードマスターが無いPCでは，setupとランチャーが`/v1/card-master`から取得します．サーバーに届かない場合は従来どおりローカルだけで動作します
 
 中央では，席の判定に使う接続元IPはOpenVerseBEが記録します (各プレイヤーのAPIからのリクエストの送信元＝そのプレイヤーの公開IP)．`cafe_key.txt`はサーバーの`OVBE_CAFE_KEY`と同じ値で，登録を身内に限るためのものです．
 

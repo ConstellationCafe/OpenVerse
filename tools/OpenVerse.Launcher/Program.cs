@@ -103,7 +103,8 @@ static class Program
         return target;
     }
 
-    // Every player runs their own API on this machine (the card master, assets and decks are their own client's).
+    // Every player runs their own API on this machine (the card master, assets and decks are their own client's, and
+    // whatever is missing comes from the OpenVerse server).
     // Centrally only room matching leaves the machine, to OpenVerseBE, and battles run on its battle server; standalone
     // the battle server runs here too
     static int Run(string baseDir, string[] args, string? beUrl, string? cafeKey)
@@ -114,11 +115,18 @@ static class Program
 
         var deckDb = ResolveDeckDb(baseDir, args);
 
-        var cardMaster = Layout.InServer("data", "card_master_full.csv.gz");
+        var cardMaster = Layout.InServer("data", CardMasterFile.FileName);
+        // a PC with no client cache gets the one the OpenVerse server's battle server uses
+        if (!File.Exists(cardMaster) && beUrl is not null && CardMasterFile.ServerAllowed)
+        {
+            Console.WriteLine($"card_master not found, asking the OpenVerse server ({beUrl})");
+            CardMasterFile.Download(beUrl, cafeKey, cardMaster, Console.WriteLine).GetAwaiter().GetResult();
+        }
         if (!File.Exists(cardMaster))
         {
             Console.Error.WriteLine($"card_master not found: {cardMaster}");
             Console.Error.WriteLine("Run openverse-setup first.");
+            Console.Error.WriteLine("카드 마스터가 없습니다. 인터넷 연결과 cafe_key.txt를 확인하고 openverse-setup을 실행해 주세요.");
             return 1;
         }
 
