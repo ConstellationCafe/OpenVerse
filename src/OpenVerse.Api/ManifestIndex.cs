@@ -113,8 +113,9 @@ public sealed class ManifestIndex
     static string Mib(long bytes) => (bytes / 1048576.0).ToString("0.###", CultureInfo.InvariantCulture);
 
     // Name,hash,category,sizeMiB,hash,sizeMiB. Columns 1 and 4 are the normal and small-resource variants, and this host
-    // only ever has one copy of a bundle
-    public byte[] Rewrite(byte[] manifest, out int rewritten, out int deferred)
+    // only ever has one copy of a bundle. deferMissing=false leaves rows this host lacks as they are: a manifest from
+    // the OpenVerse server names files the server can hand out, and has already moved aside the ones it cannot
+    public byte[] Rewrite(byte[] manifest, out int rewritten, out int deferred, bool deferMissing = true)
     {
         rewritten = 0;
         deferred = 0;
@@ -129,7 +130,7 @@ public sealed class ManifestIndex
                 outLines.Add($"{p[0]},{md5},{p[2]},{mib},{md5},{mib}");
                 rewritten++;
             }
-            else if (Predownload.Contains(p[2]))
+            else if (deferMissing && Predownload.Contains(p[2]))
             {
                 outLines.Add($"{p[0]},{p[1]},{Deferred},{p[3]},{p[4]},{p[5]}");
                 deferred++;

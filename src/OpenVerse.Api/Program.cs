@@ -61,8 +61,26 @@ if (Directory.Exists(serveManifestDir))
     foreach (var mf in Directory.GetFiles(serveManifestDir))
         manifestBytes[Path.GetFileName(mf)] = ReadManifest(mf);
 
+// Central: whatever this PC's Shadowverse folder lacks comes from OpenVerseBE, so a PC that never played before the
+// service ended (or a fresh Steam install) can still play. Its manifests name every file the server can hand out
+var assetsBeUrl = Environment.GetEnvironmentVariable("OPENVERSE_BE_URL");
+RemoteAssets? remoteAssets = string.IsNullOrWhiteSpace(assetsBeUrl)
+                             || Environment.GetEnvironmentVariable("OPENVERSE_NO_SERVER_ASSETS") == "1"
+    ? null
+    : new RemoteAssets(new Uri(assetsBeUrl.TrimEnd('/') + "/"), Environment.GetEnvironmentVariable("OPENVERSE_CAFE_KEY") ?? "");
+Dictionary<string, byte[]>? serverManifests = null;
+if (remoteAssets is not null)
+{
+    serverManifests = await remoteAssets.LoadManifests(Path.Combine(AppContext.BaseDirectory, "data", "server-manifests"));
+    if (serverManifests is null)
+    {
+        Console.WriteLine("Assets: the OpenVerse server has no game files for us right now, serving only this PC's");
+        remoteAssets = null;
+    }
+}
+
 var bundleByHash = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-if (Directory.Exists(bundleDir) && manifestBytes.Count > 0)
+if (Directory.Exists(bundleDir) && (manifestBytes.Count > 0 || serverManifests is not null))
 {
     var sidecar = Path.Combine(bundleDir, "openverse-bundles.csv");
     if (!File.Exists(sidecar))
@@ -73,9 +91,15 @@ if (Directory.Exists(bundleDir) && manifestBytes.Count > 0)
     var deferred = 0;
     foreach (var name in manifestBytes.Keys.ToList())
     {
+        // a manifest the server also has is replaced by the server's below; one only this PC has keeps the old rule
         manifestBytes[name] = index.Rewrite(manifestBytes[name], out var r, out var d);
         rewritten += r;
         deferred += d;
+    }
+    if (serverManifests is not null)
+    {
+        manifestBytes = RemoteAssets.Merge(manifestBytes, serverManifests, index, out var localRows);
+        Console.WriteLine($"Assets: server manifests merged, {localRows} rows found on this PC, the rest come from the server");
     }
 
     var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -98,6 +122,12 @@ if (Directory.Exists(bundleDir) && manifestBytes.Count > 0)
             if (byName.TryGetValue(name.Trim(), out var full)) bundleByHash[parts[1]] = full;
         }
     Console.WriteLine($"Bundles: {index.Count} files indexed ({index.Hashed} hashed), {rewritten} manifest rows matched, {deferred} not on this machine");
+}
+else if (serverManifests is not null)
+{
+    // no Shadowverse folder on this PC at all: everything comes from the server
+    manifestBytes = RemoteAssets.Merge(manifestBytes, serverManifests, null, out _);
+    Console.WriteLine($"Assets: no game folder at {bundleDir}, every file comes from the OpenVerse server");
 }
 
 // The client never caches manifest_assetmanifest (it refetches it to check for updates), so it has to be built here.
@@ -382,6 +412,11 @@ app.MapMethods("/{**path}", ["GET", "POST"], async context =>
         {
             Console.WriteLine($"  -> serving {file} ({new FileInfo(file).Length} bytes)");
             await context.Response.SendFileAsync(file);
+        }
+        else if (remoteAssets is not null && RemoteAssets.IsHash(name)
+                 && await remoteAssets.Relay(name, context.Response, context.RequestAborted))
+        {
+            Console.WriteLine($"  -> from the OpenVerse server {name} ({context.Response.ContentLength?.ToString() ?? "?"} bytes)");
         }
         else
         {

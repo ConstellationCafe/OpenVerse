@@ -116,7 +116,7 @@ static class Program
         if (!haveMaster)
         {
             Console.WriteLine("카드 마스터가 없어서 아직 플레이할 수 없습니다.");
-            Console.WriteLine($"카페에서 받은 {CardMaster} 파일을 아래 폴더에 넣거나, 인스톨러를 다시 실행해 파일을 선택하세요.");
+            Console.WriteLine($"인터넷 연결을 확인하고 인스톨러를 다시 실행하거나, 카페에서 받은 {CardMaster} 파일을 아래 폴더에 넣으세요.");
             Console.WriteLine($"  {Path.Combine(o.Dir, "server", "data")}");
             return 2;
         }
@@ -282,11 +282,11 @@ static class Program
             return true;
         }
 
-        // the player's own client cache, through the setup that ships in the zip
+        // the player's own client cache, else the OpenVerse server (be_url.txt), through the setup that ships in the zip
         var setup = Path.Combine(o.Dir, "openverse-setup.exe");
         if (OperatingSystem.IsWindows() && File.Exists(setup))
         {
-            Console.WriteLine("  셰도우버스 클라이언트 캐시에서 추출을 시도합니다...");
+            Console.WriteLine("  셰도우버스 클라이언트 캐시에서 추출하고, 없으면 OpenVerse 서버에서 받습니다...");
             try
             {
                 using var p = Process.Start(new ProcessStartInfo(setup, "--quiet")
@@ -296,14 +296,16 @@ static class Program
             catch (Exception e) { Console.WriteLine($"  setup 실행 실패: {e.Message}"); }
             if (IsCardMaster(target))
             {
-                Console.WriteLine("  추출했습니다.");
+                Console.WriteLine("  준비했습니다.");
                 return true;
             }
         }
 
-        // no cache: this PC never played before the service ended, or OpenVerse already overwrote it
+        // no cache (this PC never played before the service ended, or OpenVerse already overwrote it) and the server
+        // could not be reached or has none
         Console.WriteLine();
-        Console.WriteLine("  이 PC에는 셰도우버스 카드 데이터 캐시가 없습니다.");
+        Console.WriteLine("  이 PC에는 셰도우버스 카드 데이터 캐시가 없고, OpenVerse 서버에서도 받지 못했습니다.");
+        Console.WriteLine("  (인터넷 연결과 cafe_key.txt를 확인하고 인스톨러를 다시 실행해도 됩니다)");
         Console.WriteLine($"  카페에서 받은 {CardMaster} 파일을 선택해 주세요.");
         if (o.Yes) return false;
 

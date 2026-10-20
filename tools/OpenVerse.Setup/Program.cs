@@ -40,8 +40,25 @@ var csv = ExtractCardMaster(clientData, outDir);
 var existingMaster = Path.Combine(outDir, "card_master_full.csv.gz");
 if (csv is null && File.Exists(existingMaster))
 {
-    csv = ReadCardMaster(existingMaster);
+    csv = CardMasterFile.Read(existingMaster, Console.Error.WriteLine);
     if (csv is not null) Console.WriteLine($"card_master: no client cache, using the one already in place ({existingMaster})");
+}
+// Still none, or one from before the final patch: the OpenVerse server (be_url.txt) hands out the one its battle
+// server uses. Only a final one replaces what is here
+if ((csv is null || ContentHash(csv) != LatestHash) && CardMasterFile.ServerAllowed
+    && SettingFile.Read(Layout.Root, "be_url.txt") is { } beUrl)
+{
+    Console.WriteLine(csv is null
+        ? $"card_master: asking the OpenVerse server ({beUrl})"
+        : $"card_master: this one is not the final version, asking the OpenVerse server ({beUrl})");
+    var tmp = existingMaster + ".server";
+    var fromServer = await CardMasterFile.Download(beUrl, SettingFile.Read(Layout.Root, "cafe_key.txt"), tmp, Console.WriteLine);
+    if (fromServer is not null && (csv is null || ContentHash(fromServer) == LatestHash))
+    {
+        File.Move(tmp, existingMaster, overwrite: true);
+        csv = fromServer;
+    }
+    try { if (File.Exists(tmp)) File.Delete(tmp); } catch (IOException) { }
 }
 var extracted = csv is not null;
 var latest = extracted && ContentHash(csv!) == LatestHash;
@@ -54,8 +71,10 @@ Console.WriteLine(extracted ? "  [ok] card_master" : "  [--] card_master (not ex
 if (!extracted)
 {
     Console.WriteLine();
+    Console.WriteLine($"  No client cache, and the OpenVerse server could not hand one out (be_url.txt, cafe_key.txt).");
     Console.WriteLine($"  Copy card_master_full.csv.gz from a PC where setup worked into:");
     Console.WriteLine($"    {outDir}");
+    Console.WriteLine($"  서버에서도 받지 못했습니다. 인터넷 연결과 cafe_key.txt를 확인하고 다시 실행하거나,");
     Console.WriteLine($"  setup이 성공한 PC의 card_master_full.csv.gz 파일을 위 폴더에 넣으면 됩니다 (setup은 다시 실행하지 않아도 됩니다).");
 }
 foreach (var f in bundled)
@@ -68,7 +87,7 @@ Console.WriteLine();
 
 const uint MbError = 0x10, MbWarn = 0x30, MbInfo = 0x40;
 var (title, body, icon) =
-    !extracted && haveBundled ? ("セットアップ失敗", $"card_master がありません。\nsetup이 성공한 PC의 card_master_full.csv.gz 파일을 아래 폴더에 넣어 주세요:\n{outDir}", MbError)
+    !extracted && haveBundled ? ("セットアップ失敗", $"card_master がありません。\n서버에서도 받지 못했습니다. 인터넷 연결과 cafe_key.txt를 확인하고 다시 실행하거나,\nsetup이 성공한 PC의 card_master_full.csv.gz 파일을 아래 폴더에 넣어 주세요:\n{outDir}", MbError)
     : !ready ? ("セットアップ失敗", "セットアップに失敗しました。コンソールの [--] を確認してください。", MbError)
     : !latest ? ("セットアップ完了 (警告)", "セットアップは完了しましたが、card_master が最新ではありません。\n終了直前まで同期していないクライアントのため、一部のカードが古い可能性があります。", MbWarn)
     : ("セットアップ完了", "セットアップが完了しました。openverse-launcher を実行して遊べます。", MbInfo);
@@ -107,24 +126,6 @@ static string? ExtractCardMaster(string clientData, string outDir)
 
     Console.WriteLine($"card_master: {csv.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length} rows -> {outPath}");
     return csv;
-}
-
-// a card master already in the data folder (copied from another PC, or extracted earlier). null if it is not one
-static string? ReadCardMaster(string path)
-{
-    try
-    {
-        using var fs = File.OpenRead(path);
-        using var gz = new GZipStream(fs, CompressionMode.Decompress);
-        using var sr = new StreamReader(gz, Encoding.UTF8);
-        var csv = sr.ReadToEnd();
-        return csv.Split('\n').Length > 100 ? csv : null;
-    }
-    catch (Exception e)
-    {
-        Console.Error.WriteLine($"card_master: {path} is not a usable card master ({e.Message})");
-        return null;
-    }
 }
 
 static string ContentHash(string csv)
