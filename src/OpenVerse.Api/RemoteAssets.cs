@@ -22,6 +22,17 @@ public sealed class RemoteAssets
     public TimeSpan HeaderTimeout { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan RetryDelay { get; init; } = TimeSpan.FromSeconds(2);
     public int Attempts { get; init; } = 6;
+    // game files: a busy or briefly unreachable server is asked again for longer, with pauses up to MaxRetryDelay
+    public int FileAttempts { get; init; } = 30;
+    public TimeSpan MaxRetryDelay { get; init; } = TimeSpan.FromSeconds(10);
+    // how often to ask again while in line, when the server does not say (Retry-After)
+    public TimeSpan QueuePoll { get; init; } = TimeSpan.FromSeconds(5);
+
+    // Who this PC is in the server's download line (one per launch). The line itself is the server's: while every
+    // download place is taken, a game file is answered 429 {"error":"queued","position":n} and this keeps asking,
+    // without giving up, until its turn comes
+    public string DownloadId { get; } = Guid.NewGuid().ToString("N");
+    int _lastPosition = -1;
 
     sealed record ManifestEntry(string Name, long Size, string? Md5);
     sealed record ManifestList(List<ManifestEntry> Manifests);
@@ -46,6 +57,7 @@ public sealed class RemoteAssets
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, path);
         if (_cafeKey.Length > 0) req.Headers.Add("X-OV-Cafe-Key", _cafeKey);
+        req.Headers.Add("X-OV-Download-Id", DownloadId);
         using var headers = CancellationTokenSource.CreateLinkedTokenSource(ct);
         headers.CancelAfter(HeaderTimeout);
         try
@@ -62,19 +74,38 @@ public sealed class RemoteAssets
         code is HttpStatusCode.ServiceUnavailable or HttpStatusCode.TooManyRequests or HttpStatusCode.BadGateway
             or HttpStatusCode.GatewayTimeout or HttpStatusCode.RequestTimeout;
 
-    // GET with the gate held and retries; the caller disposes. null = the server does not have it (or never will)
-    async Task<HttpResponseMessage?> GetWithRetry(string path, string what, CancellationToken ct)
+    sealed record Queued(string? Error, int Position, int Active, int Waiting);
+
+    // GET with the gate held and retries; the caller disposes. null = the server does not have it (or never will).
+    // file = a game file: waiting in the server's line never counts as a try, and other trouble is tried for longer
+    async Task<HttpResponseMessage?> GetWithRetry(string path, string what, CancellationToken ct, bool file = false)
     {
+        var limit = file ? FileAttempts : Attempts;
         for (var attempt = 1; ; attempt++)
         {
             string why;
             try
             {
                 var res = await Get(path, ct);
-                if (res.IsSuccessStatusCode) return res;
+                if (res.IsSuccessStatusCode)
+                {
+                    if (file && Interlocked.Exchange(ref _lastPosition, -1) > 0)
+                        _log("  [assets] 차례가 왔습니다. 다운로드를 시작합니다 (your turn, downloading)");
+                    return res;
+                }
                 var code = res.StatusCode;
                 var body = await res.Content.ReadAsStringAsync(ct);
+                var retryAfter = res.Headers.RetryAfter?.Delta;
                 res.Dispose();
+                if (file && code == HttpStatusCode.TooManyRequests && TryQueued(body) is { } q)
+                {
+                    if (Interlocked.Exchange(ref _lastPosition, q.Position) != q.Position)
+                        _log($"  [assets] 다운로드 대기 중: {q.Position}번째 (지금 받는 사람 {q.Active}명) " +
+                             $"- waiting in line, position {q.Position}");
+                    attempt = 0;
+                    await Task.Delay(retryAfter is { } ra && ra > TimeSpan.Zero ? ra : QueuePoll, ct);
+                    continue;
+                }
                 if (!Retryable(code) || body.Contains("assets_failed"))
                 {
                     _log($"  [assets] {what}: server answered {(int)code} {Short(body)}");
@@ -86,13 +117,24 @@ public sealed class RemoteAssets
             {
                 why = e.Message;
             }
-            if (attempt >= Attempts)
+            if (attempt >= limit)
             {
                 _log($"  [assets] {what}: giving up after {attempt} tries ({why})");
                 return null;
             }
-            await Task.Delay(RetryDelay * attempt, ct);
+            var pause = RetryDelay * attempt;
+            await Task.Delay(pause < MaxRetryDelay ? pause : MaxRetryDelay, ct);
         }
+    }
+
+    static Queued? TryQueued(string body)
+    {
+        try
+        {
+            var q = JsonSerializer.Deserialize<Queued>(body, Json);
+            return q is { Error: "queued", Position: > 0 } ? q : null;
+        }
+        catch (JsonException) { return null; }
     }
 
     static string Short(string s) => s.Length > 120 ? s[..120] : s;
@@ -172,7 +214,7 @@ public sealed class RemoteAssets
         await _gate.WaitAsync(ct);
         try
         {
-            using var res = await GetWithRetry("v1/assets/files/" + md5.ToLowerInvariant(), md5, ct);
+            using var res = await GetWithRetry("v1/assets/files/" + md5.ToLowerInvariant(), md5, ct, file: true);
             if (res is null) return false;
             response.StatusCode = StatusCodes.Status200OK;
             response.ContentType = "application/octet-stream";
