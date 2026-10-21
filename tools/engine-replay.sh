@@ -25,9 +25,12 @@ OV_OUT=${OV_OUT:-$HOME/ov-replay}
 
 echo "== copying recordings out of the battle container"
 rm -rf "$OV_OUT"; mkdir -p "$OV_OUT"
-( cd "$OV_HOME/service" && docker compose --env-file ../.env cp battle:/tmp/ov-engine-rec/. "$OV_OUT/" ) \
-  || { echo "no recordings yet (the battle server records once it runs a build with EngineRecorder and a match is played)"; exit 1; }
-ls -1 "$OV_OUT"/*.jsonl | sed 's/^/   /'
+if ( cd "$OV_HOME/service" && docker compose --env-file ../.env cp battle:/tmp/ov-engine-rec/. "$OV_OUT/" ) 2>/dev/null; then
+  ls -1 "$OV_OUT"/*.jsonl 2>/dev/null | sed 's/^/   /' || echo "   (none)"
+else
+  echo "   no recordings yet: only the shipped capture (CaptureFollowTests) is replayed. The battle server records once it"
+  echo "   runs a build that has EngineRecorder and a match has been played"
+fi
 
 echo "== building OpenVerse ($REF) with the engine and replaying (takes a few minutes)"
 docker run --rm \
@@ -40,8 +43,8 @@ docker run --rm \
     cd /src
     dotnet test tests/OpenVerse.Tests/OpenVerse.Tests.csproj -c Release -nologo \
       --filter "FullyQualifiedName~EngineReplayTests|FullyQualifiedName~CaptureFollowTests" \
-      --logger "console;verbosity=normal" 2>&1 | tail -40 > /rec/test-output.txt || true
-    tail -15 /rec/test-output.txt'
+      --logger "console;verbosity=detailed" > /rec/test-output.txt 2>&1 || true
+    grep -E "error|relayed rows|unapplied|^ +[0-9]+x |Passed!|Failed!|Total tests" /rec/test-output.txt | head -40'
 
 echo
 if [ -f "$OV_OUT/replay-report.txt" ]; then
