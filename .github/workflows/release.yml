@@ -66,7 +66,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $exe = (Resolve-Path dist/installer/OpenVerse-Installer.exe).Path
           function Run([string[]]$a) { & $exe @a | Out-Host; return $LASTEXITCODE }
-          function Must([bool]$ok, [string]$why) { if (-not $ok) { throw $why } }
+          function Must([bool]$ok, [string]$why) { if (-not $ok) { Write-Output "::error title=installer::$why"; throw $why } }
           function SettingValue($f) { Get-Content $f | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") } | Select-Object -First 1 }
 
           # a stand-in card master (a gzip'd CSV over 100 rows): the real one is never in CI
@@ -119,7 +119,8 @@ jobs:
           Must ((Run @("--zip", "OpenVerse.zip", "--tag", "ci3", "--dir", $d1, "--yes", "--shortcut-dir", $desk)) -eq 0) "reinstall before uninstall failed"
           $quiet = (Get-ItemProperty $key).QuietUninstallString
           Must ($quiet -like "*--yes*") "no quiet uninstall command"
-          $p = Start-Process cmd.exe -ArgumentList "/c $quiet" -Wait -PassThru -NoNewWindow
+          # /s keeps the quotes around the exe path, the way Windows runs the registered command line
+          $p = Start-Process cmd.exe -ArgumentList "/d /s /c `"$quiet`"" -Wait -PassThru -NoNewWindow
           Must ($p.ExitCode -eq 0) "uninstall exited $($p.ExitCode)"
           Must (-not (Test-Path $d1)) "install folder left behind"
           Must (-not (Test-Path (Join-Path $desk "OpenVerse.lnk"))) "shortcut left behind"
