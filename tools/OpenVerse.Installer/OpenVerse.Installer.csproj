@@ -8,6 +8,7 @@
     <AssemblyName>OpenVerse-Installer</AssemblyName>
     <RootNamespace>OpenVerse.Installer</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>$(MSBuildThisFileDirectory)../../assets/openverse.ico</ApplicationIcon>
   </PropertyGroup>
 
 </Project>
