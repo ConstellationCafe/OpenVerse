@@ -23,6 +23,21 @@ static class Program
     static int Main(string[] args)
     {
         try { Console.OutputEncoding = Encoding.UTF8; } catch { }
+
+        // removal, from '앱 및 기능' (the copy registered there runs with --uninstall) or by hand
+        if (args.Contains("--uninstall-system")) return Uninstall.SystemOnly();
+        if (args.Contains("--uninstall"))
+        {
+            Options u;
+            try { u = Parse(args); }
+            catch (ArgumentException e) { Console.Error.WriteLine(e.Message); return 1; }
+            int code;
+            try { code = Uninstall.Run(u.Dir, u.Yes, u.ShortcutDir); }
+            catch (Exception e) { Console.WriteLine($"제거에 실패했습니다: {e.Message}"); code = 1; }
+            if (!u.Yes) Pause();
+            return code;
+        }
+
         Options o;
         try { o = Parse(args); }
         catch (ArgumentException e) { Console.Error.WriteLine(e.Message); return 1; }
@@ -101,11 +116,14 @@ static class Program
             if (downloaded is not null) try { File.Delete(downloaded); } catch { }
         }
 
-        // 3. card master
+        // 3. '앱 및 기능' entry, so it can be removed like any other program
+        Uninstall.Register(o.Dir, tag, o.NoShortcut ? null : o.ShortcutDir);
+
+        // 4. card master
         Console.WriteLine();
         var haveMaster = EnsureCardMaster(o);
 
-        // 4. shortcut
+        // 5. shortcut
         if (!o.NoShortcut && OperatingSystem.IsWindows())
         {
             var lnk = CreateShortcut(o.Dir, o.ShortcutDir);

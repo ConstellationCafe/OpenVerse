@@ -87,6 +87,10 @@ jobs:
           Must ((Get-Content (Join-Path $d1 "installed-version.txt")) -eq "ci1") "version not recorded"
           Must ((SettingValue (Join-Path $d1 "be_url.txt")) -eq $env:BE_URL) "be_url.txt not as released"
           Must (Test-Path (Join-Path $desk "OpenVerse.lnk")) "no shortcut"
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenVerse"
+          $reg = Get-ItemProperty $key
+          Must ($reg.DisplayName -eq "OpenVerse" -and $reg.DisplayVersion -eq "ci1" -and $reg.InstallLocation -eq $d1) "not registered in Programs and Features"
+          Must ($reg.UninstallString -like "*--uninstall*") "no uninstall command registered"
 
           # 2. update over it: the card master and a filled-in setting survive, the version moves
           Add-Content (Join-Path $d1 "cafe_key.txt") "player-key"
@@ -110,8 +114,22 @@ jobs:
           Must ($v -like "v*") "unexpected release version '$v'"
           Must (Test-Path (Join-Path $d3 "server/OpenVerse.Api.exe")) "downloaded release not unpacked"
 
+          # 5. removal the way '앱 및 기능' does it: the registered uninstaller copy, quietly. Install folder, shortcut,
+          #    registry entry and (a moment later) the uninstaller copy itself are gone
+          Must ((Run @("--zip", "OpenVerse.zip", "--tag", "ci3", "--dir", $d1, "--yes", "--shortcut-dir", $desk)) -eq 0) "reinstall before uninstall failed"
+          $quiet = (Get-ItemProperty $key).QuietUninstallString
+          Must ($quiet -like "*--yes*") "no quiet uninstall command"
+          $p = Start-Process cmd.exe -ArgumentList "/c $quiet" -Wait -PassThru -NoNewWindow
+          Must ($p.ExitCode -eq 0) "uninstall exited $($p.ExitCode)"
+          Must (-not (Test-Path $d1)) "install folder left behind"
+          Must (-not (Test-Path (Join-Path $desk "OpenVerse.lnk"))) "shortcut left behind"
+          Must (-not (Test-Path $key)) "Programs and Features entry left behind"
+          $un = Join-Path $env:LOCALAPPDATA "OpenVerse-Uninstall"
+          for ($i = 0; $i -lt 20 -and (Test-Path $un); $i++) { Start-Sleep -Milliseconds 500 }
+          Must (-not (Test-Path $un)) "uninstaller did not remove itself"
+
           $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-          Write-Output "::notice title=installer::OpenVerse-Installer.exe $mb MB: install, update, no-card-master and download-from-release ($v) all passed"
+          Write-Output "::notice title=installer::OpenVerse-Installer.exe $mb MB: install, update, no-card-master, download-from-release ($v) and uninstall all passed"
 
       - uses: actions/upload-artifact@v4
         with:
