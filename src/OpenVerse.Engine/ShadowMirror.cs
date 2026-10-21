@@ -23,7 +23,7 @@ public sealed class ShadowMirror : IDisposable
     EngineContext? _ctx;
     Type? _host;
     MethodInfo? _boot, _create, _ingest, _verdict, _state, _close, _costOf, _cardIdOf, _answerConditions, _setDeckMirror;
-    MethodInfo? _project, _cursor, _lastVerdict, _playByIntent;
+    MethodInfo? _project, _cursor, _lastVerdict, _playByIntent, _zones;
     // unbounded: a dropped job is a hole in the board, and the board is what every later answer is read off. The old
     // 256-slot cap turned a slow boot or a busy machine into a silently wrong cost
     readonly BlockingCollection<Action> _work = new();
@@ -65,6 +65,7 @@ public sealed class ShadowMirror : IDisposable
             _setDeckMirror = _host.GetMethod("SetDeckMirror", Pub);
             _project = _host.GetMethod("Project", Pub);
             _cursor = _host.GetMethod("RandomCursor", Pub);
+            _zones = _host.GetMethod("Zones", Pub);
             _lastVerdict = _host.GetMethod("LastVerdict", Pub);
             _playByIntent = _host.GetMethod("PlayByIntent", Pub);
             if (_boot is null || _create is null || _ingest is null || _verdict is null || _state is null || _close is null)
@@ -250,6 +251,10 @@ public sealed class ShadowMirror : IDisposable
         passed = !verdict.StartsWith("FAIL", StringComparison.Ordinal);
         return ok && verdict.Length > 0;
     }
+
+    // every zone by index (hand, field, cemetery, deck) on both sides, for the replay rig
+    public bool TryZones(out string zones, int timeoutMs = AnswerBudgetMs) =>
+        Ask(_zones, [_handle], o => o as string ?? "", out zones, "", timeoutMs, "zones unread");
 
     // The shared StableRandom cursor, or -1. A receiver's spin is the actor's delta minus its own
     public bool TryRandomCursor(out int cursor, int timeoutMs = AnswerBudgetMs) =>

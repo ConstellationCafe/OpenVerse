@@ -570,6 +570,7 @@ public sealed class BattleHub
     {
         if (PairFor(s) is not { } pair) return;
         var fromA = IsShadowPlayer(s);
+        EngineRecorder.Observe(s.BattleId, uri, body, fromA);
         pair.Observe(uri, body, fromA, l => Console.WriteLine($"[{s.Id}] {l}"));
         if (Engine.ShadowBridge.Role < Engine.ShadowBridge.EngineRole.AnswerBlanks) return;
         if (pair.PeerRefusedLast(fromA, out var verdict))
@@ -589,10 +590,14 @@ public sealed class BattleHub
         }
         // the StableRandom stream has to be the one the two clients draw from, not a deck seed: every answer either
         // board gives about a random effect is computed from it
-        pair.Begin(_stableSeed.GetValueOrDefault(a.BattleId, 12345), aFirst: true,
+        var seed = _stableSeed.GetValueOrDefault(a.BattleId, 12345);
+        pair.Begin(seed, aFirst: true,
             ShuffledDeckFor(first), ShuffledDeckFor(second),
             OpeningHandIdx(first), OpeningHandIdx(second),
             l => Console.WriteLine($"[{first.Id}] {l}"));
+        EngineRecorder.Begin(a.BattleId, seed, ShuffledDeckFor(first), ShuffledDeckFor(second),
+            OpeningHandIdx(first), OpeningHandIdx(second),
+            _idxSeed.GetValueOrDefault(first.Id, -1), _idxSeed.GetValueOrDefault(second.Id, -1));
         // The clients reshuffle a card's deck slot when it goes back, off idxChangeSeed, and the shadow never sees the
         // Deal that carries it. ShadowMatch.SetDeckMirror installs one, but doing so measurably worsens the only
         // end-to-end check there is (ShadowCostFidelityTests goes 3 charges short), so leave it off until a capture
@@ -1571,6 +1576,7 @@ public sealed class BattleHub
             : _finishCode.GetValueOrDefault(ShadowPlayerId(reporter) ?? "", 0);
         var pair = PairFor(reporter);
         _shadowOf.TryRemove(reporter.BattleId, out _);
+        EngineRecorder.End(reporter.BattleId);
         pair?.End((name, engineCode, state) => Console.WriteLine(
             engineCode == relayCode
                 ? $"[{name}] agrees, result {engineCode} | {state}"

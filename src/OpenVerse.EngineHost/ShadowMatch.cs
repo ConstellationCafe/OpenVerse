@@ -162,6 +162,15 @@ namespace OpenVerse.EngineHost
             catch (Exception e) { return "unreadable: " + Headless.Root(e); }
         }
 
+        // every zone by index, for finding where a board first parts from the match it is following
+        public static string Zones(int handle)
+        {
+            ShadowBattle b;
+            if (!_live.TryGetValue(handle, out b)) return "";
+            try { return b.Zones(); }
+            catch (Exception e) { return "unreadable: " + Headless.Root(e); }
+        }
+
         public static void Close(int handle)
         {
             _live.Remove(handle);
@@ -500,6 +509,19 @@ namespace OpenVerse.EngineHost
             var p = Mgr.BattlePlayer;
             var e = Mgr.BattleEnemy;
             return Side("P", p) + " | " + Side("E", e);
+        }
+
+        public string Zones() => ZoneSide("P", Mgr.BattlePlayer) + "\n" + ZoneSide("E", Mgr.BattleEnemy);
+
+        static string ZoneSide(string tag, BattlePlayerBase s)
+        {
+            string Ids(IEnumerable<BattleCardBase> cards) => cards == null ? "-" :
+                string.Join(",", cards.Where(c => c != null).Select(c => c.Index + ":" + c.CardId));
+            return tag + " turn=" + s.Turn + " selfTurn=" + s.IsSelfTurn + " life=" + s.Class.Life + " pp=" + s.Pp
+                 + "\n   hand  [" + Ids(s.HandCardList) + "]"
+                 + "\n   field [" + Ids(s.InPlayCards) + "]"
+                 + "\n   grave [" + Ids(s.CemeteryList) + "]"
+                 + "\n   deck  " + s.DeckCardList.Count + " [" + string.Join(",", s.DeckCardList.Where(c => c != null).Select(c => c.Index)) + "]";
         }
 
         static string Side(string tag, BattlePlayerBase s)

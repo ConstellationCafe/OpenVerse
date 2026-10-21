@@ -32,11 +32,14 @@ public sealed class MirrorPair : IDisposable
 
     static int[] Dummies() => Enumerable.Repeat(Dummy, DeckSize).ToArray();
 
-    public void Begin(int seed, bool aFirst, int[] aDeck, int[] bDeck, int[] aHand, int[] bHand, Action<string> log)
+    // aIdxSeed/bIdxSeed: the idxChangeSeed each player was dealt. -1 (the default, and what the relay passes) leaves
+    // SetDeckMirror off; the replay rig passes them to measure whether installing it keeps the boards in step
+    public void Begin(int seed, bool aFirst, int[] aDeck, int[] bDeck, int[] aHand, int[] bHand, Action<string> log,
+                      int aIdxSeed = -1, int bIdxSeed = -1)
     {
         // each side faces dummies, which is the board its client actually has. playerFirst is viewpoint-relative
-        A.Begin(seed, aFirst, aDeck, Dummies(), aHand, bHand, log);
-        B.Begin(seed, !aFirst, bDeck, Dummies(), bHand, aHand, log);
+        A.Begin(seed, aFirst, aDeck, Dummies(), aHand, bHand, log, aIdxSeed, bIdxSeed);
+        B.Begin(seed, !aFirst, bDeck, Dummies(), bHand, aHand, log, bIdxSeed, aIdxSeed);
     }
 
     // opt-in until this is measured: a board that drives its own play differently is a new way to be wrong
